@@ -11,6 +11,52 @@ after_install = "orion.install.after_install"
 
 fixtures = [
     {"dt": "Role", "filters": [["name", "in", ["Orion Admin", "Orion Project Admin"]]]},
+    {
+        "dt": "Custom Field",
+        "filters": [
+            [
+                "name",
+                "in",
+                [
+                    "Account-orion_business_line",
+                    "Account-orion_legacy_id",
+                    "Journal Entry-orion_source_type",
+                    "Journal Entry-orion_txn_hash",
+                    "Journal Entry-orion_bank_account_no",
+                    "Journal Entry-orion_source_file",
+                    "Journal Entry-orion_legacy_id",
+                    "Project-orion_business_line",
+                    "Project-kn_sequence",
+                    "Project-kontrak_yymm",
+                    "Project-lctr",
+                    "Project-orion_service_type",
+                    "Project-target_margin_pct",
+                    "Project-orion_program",
+                    "Project-client_salutation",
+                    "Project-client_phone",
+                    "Project-client_address",
+                    "Project-orion_legacy_id",
+                    "Customer-orion_legacy_id",
+                    "Supplier-orion_vendor_code",
+                    "Supplier-orion_legacy_id",
+                    "Lead-orion_business_line",
+                    "Lead-orion_service_interest",
+                    "Lead-orion_estimated_value",
+                    "Lead-orion_short_name",
+                    "Lead-orion_lead_status",
+                    "Lead-orion_legacy_id",
+                    "Bank Account-orion_owner_type",
+                    "Bank Account-orion_purpose",
+                    "Bank Account-orion_legacy_id",
+                    "Sales Invoice-orion_legacy_id",
+                    "Sales Invoice Item-orion_percentage",
+                    "Payment Entry-orion_receipt_code",
+                    "Payment Entry-orion_legacy_id",
+                    "User-orion_legacy_id",
+                ],
+            ]
+        ],
+    },
 ]
 
 # Each item in the list will be shown as an app in the apps page

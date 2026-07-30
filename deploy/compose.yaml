@@ -75,6 +75,11 @@ services:
 
   backend:
     <<: *app_image
+    # service-level volumes replace the anchor's list, so sites/logs repeat here
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - /opt/erpnext/migrate-data:/home/frappe/migrate-data:ro
     mem_limit: 1536m
     depends_on:
       configurator:

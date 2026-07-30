@@ -1,0 +1,93 @@
+{
+ "actions": [],
+ "creation": "2026-07-30 09:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "claude_model",
+  "column_break_cost_centers",
+  "ratunda_cost_center",
+  "poiesis_cost_center",
+  "shared_cost_center"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "claude_model",
+   "fieldtype": "Data",
+   "label": "Claude Model"
+  },
+  {
+   "fieldname": "column_break_cost_centers",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "ratunda_cost_center",
+   "fieldtype": "Link",
+   "label": "Ratunda Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "poiesis_cost_center",
+   "fieldtype": "Link",
+   "label": "Poiesis Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "shared_cost_center",
+   "fieldtype": "Link",
+   "label": "Shared Cost Center",
+   "options": "Cost Center"
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-07-30 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "Orion Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "Orion Project Admin",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
