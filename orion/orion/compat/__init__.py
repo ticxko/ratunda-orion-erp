@@ -4,3 +4,6 @@ from orion.compat.handle import handle  # noqa: F401
 
 # Import handler modules for their @route registrations.
 from orion.compat import accounting  # noqa: E402,F401
+from orion.compat import accounting_reports  # noqa: E402,F401
+from orion.compat import bank_statement  # noqa: E402,F401
+from orion.compat import supply_chain  # noqa: E402,F401

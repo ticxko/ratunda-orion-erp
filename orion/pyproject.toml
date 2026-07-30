@@ -9,6 +9,10 @@ readme = "README.md"
 dynamic = ["version"]
 dependencies = [
     # "frappe~=16.0.0" # Installed and managed by bench.
+    # Bank-statement pipeline (orion.accounting.bank_statement / pdf_password);
+    # pins match ratunda-erp-orion-bellatrix-python's pyproject.
+    "anthropic>=0.42",
+    "pypdf>=6.10.2",
 ]
 
 [build-system]

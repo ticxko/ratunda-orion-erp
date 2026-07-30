@@ -1,32 +1,54 @@
-"""Accounting compat handlers — Phase A (read-only tranche).
+"""Accounting compat handlers.
 
 Mirrors the bellatrix-python routers under app/routers/accounting/ so the
 feynman accounting screens work unchanged against ERPNext data:
 
   /api/accounting/accounts            <- accounts.py           (GET list)
   /api/accounting/bank-accounts       <- bank_accounts.py      (GET list)
-  /api/accounting/journal-entries     <- journal_entries.py    (GET list, GET /:id)
+  /api/accounting/journal-entries     <- journal_entries.py    (GET, POST batch+dedup,
+                                                                PATCH, DELETE, POST /:id/reverse)
   /api/accounting/general-ledger      <- general_ledger.py     (GET)
   /api/accounting/financial-reports/* <- financial_reports.py  (GET tb/pl/bs)
+  /api/accounting/invoices            <- invoices.py           (GET list/:id, POST,
+                                                                POST /:id/send, POST /:id/payment)
+  /api/accounting/bank-loans          <- bank_loans.py         (GET list/:id/unlinked-lines,
+                                                                POST, PATCH, DELETE,
+                                                                POST /:id/drawdown, /:id/payment)
+  /api/accounting/disbursements       <- disbursements.py      (GET list/:id, POST, PATCH, DELETE,
+                                                                POST /:id/approve /transfer
+                                                                /settle /cancel)
 
 Serialization parity (checked against the source venv, pydantic 2.13 /
-fastapi 0.136): journal line debit/credit are Numeric(15,2) Decimals and go
-over the wire as JSON *strings* with two decimals ("1500000.00"); the GL and
-financial-report money fields are explicit float() in the source and stay
-JSON numbers. Datetimes serialize as naive ISO-8601 ("2026-01-02T03:04:05").
+fastapi 0.136): Numeric(15,2) Decimal columns go over the wire as JSON
+*strings* with two decimals ("1500000.00"); the GL and financial-report money
+fields are explicit float() in the source and stay JSON numbers. Datetimes
+serialize as naive ISO-8601 ("2026-01-02T03:04:05"). Computed Decimal sums
+that the source would render as "0" are emitted "0.00" here — feynman
+parseFloat()s every money string, so only the byte form differs.
 
-Write verbs (POST/PATCH/DELETE, /:id/reverse) intentionally throw — Phase A
-is read-first; feynman keeps partial data in view on those failures.
+Write semantics vs the source (see each handler's docstring for detail):
+ids in payloads are legacy Orion ids and resolve via orion_legacy_id first,
+then ERPNext name; every response id is orion_legacy_id when present else
+doc.name. GL posts through submitted ERPNext docs (JE / Sales Invoice /
+Payment Entry) built with the same account+cost-center rules as
+orion.migrate, so TB parity is preserved by construction.
 """
 
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, time, timedelta
+from decimal import Decimal
 
 import frappe
 
+from orion.accounting.loan_codes import next_doc_code
+from orion.accounting.txn_hash import compute_txn_hash, has_real_ref
 from orion.compat.handle import route, split_path
 
 JE_PREFIX = "/api/accounting/journal-entries"
 FR_PREFIX = "/api/accounting/financial-reports"
+INV_PREFIX = "/api/accounting/invoices"
+LOAN_PREFIX = "/api/accounting/bank-loans"
+DISB_PREFIX = "/api/accounting/disbursements"
 
 # Reverse of migrate/coa.py ROOT_TYPE (many-to-one there): the account code's
 # leading digit disambiguates the P&L flavors, balance-sheet roots map 1:1.
@@ -53,6 +75,32 @@ SOURCE_TYPE_BY_VOUCHER = {
 	"Sales Invoice": "INVOICE",
 	"Payment Entry": "INVOICE_PAYMENT",
 }
+
+BRAND_LINES = ("RATUNDA_RENOVASI", "POIESIS_STUDIO")
+
+# bank_loans.py: default liability account (by code) per lender type.
+DEFAULT_ACCOUNT_BY_LENDER = {
+	"BANK": "2-1700",
+	"OWNER": "2-1500",
+	"THIRD_PARTY": "2-1800",
+}
+LOAN_INTEREST_CODE = "8-1100"
+
+# Window used when looking for an already-posted JE that matches a drawdown.
+DUPLICATE_WINDOW_DAYS = 3
+
+# disbursements.py: per-category COGS account codes + the funding bank.
+CATEGORY_GL = {
+	"MATERIAL": "5-1100",
+	"UPAH": "5-1200",
+	"OPERASIONAL": "5-1600",
+	"TRANSPORT": "5-1400",
+}
+KOPRA_GL = "1-1120"
+
+# invoices.py: AR / default revenue account codes per business line.
+AR_CODE = {"POIESIS_STUDIO": "1-1220", "RATUNDA_RENOVASI": "1-1210"}
+REV_CODE = {"POIESIS_STUDIO": "4-2100", "RATUNDA_RENOVASI": "4-1100"}
 
 
 @route("/api/accounting/accounts")
@@ -143,21 +191,41 @@ def bank_accounts(path: str, verb: str, payload: dict):
 def journal_entries(path: str, verb: str, payload: dict):
 	"""Journal entries — app/routers/accounting/journal_entries.py.
 
-	GET ''    -> {entries: [JournalEntryRead]} ordered date desc.
-	GET /:id  -> {entry: JournalEntryRead} (JournalEntryEnvelope shape; the
-	source router has no GET detail — feynman only lists — but compat resolves
-	by orion_legacy_id first, then by Journal Entry name).
-	POST / PATCH / DELETE / :id/reverse -> throw (read-only tranche).
+	GET ''            -> {entries: [JournalEntryRead]} ordered date desc.
+	GET /:id          -> {entry: JournalEntryRead} (JournalEntryEnvelope shape;
+	                     the source router has no GET detail — feynman only
+	                     lists — but compat resolves by orion_legacy_id first,
+	                     then by Journal Entry name).
+	POST ''           -> create batch (JournalEntryService.create_batch): per-
+	                     entry balance check, BANK_IMPORT txn-hash dedup with
+	                     within-batch collision suffixing and cross-account
+	                     reference dedup; returns CreateJournalEntriesResponse
+	                     {entries, created, skipped, skippedList}.
+	PATCH /:id        -> MANUAL entries: full replace (cancel+delete+recreate,
+	                     orion_legacy_id carried so the emitted id is stable);
+	                     non-MANUAL: projectId-only reallocation (rows + GL).
+	DELETE /:id       -> MANUAL only: cancel + delete -> {success: true}.
+	POST /:id/reverse -> reversal JE (swapped Dr/Cr, reversal_of link) with the
+	                     source's cascade: loan events deleted + loan resynced,
+	                     cash advances reverted to APPROVED.
 	"""
 	bare, _query = split_path(path)
 	rest = bare[len(JE_PREFIX):].strip("/")
-	if verb == "GET" and not rest:
+	parts = rest.split("/") if rest else []
+	if verb == "GET" and not parts:
 		return {"entries": _je_read(_je_headers())}
-	if verb == "GET" and "/" not in rest:
-		return {"entry": _je_detail(rest)}
-	frappe.throw(
-		"%s %s is not yet implemented in compat — Phase A is read-only" % (verb, bare)
-	)
+	if verb == "POST" and not parts:
+		return _je_create_batch(payload)
+	if len(parts) == 1:
+		if verb == "GET":
+			return {"entry": _je_detail(parts[0])}
+		if verb == "PATCH":
+			return {"entry": _je_update(parts[0], payload)}
+		if verb == "DELETE":
+			return _je_delete(parts[0])
+	if verb == "POST" and len(parts) == 2 and parts[1] == "reverse":
+		return {"reversalEntry": _je_reverse(parts[0], payload)}
+	frappe.throw("No compat handler for %s %s" % (verb, bare), exc=frappe.DoesNotExistError)
 
 
 @route("/api/accounting/general-ledger")
@@ -413,10 +481,12 @@ def _balance_sheet(query: dict) -> dict:
 # ── journal entry builders ──────────────────────────────────────────────────
 
 
-def _je_headers(name: str | None = None):
+def _je_headers(name: str | None = None, names: list | None = None):
 	filters = {"company": _company(), "docstatus": ("!=", 2)}
 	if name:
 		filters = {"name": name}
+	elif names is not None:
+		filters = {"name": ("in", names)}
 	fields = [
 		"name", "posting_date", "user_remark", "cheque_no", "creation", "modified",
 		"orion_legacy_id", "orion_source_type", "orion_txn_hash",
@@ -711,3 +781,526 @@ def _iso_date(d) -> str | None:
 	if not d:
 		return None
 	return "%sT00:00:00" % d
+
+
+# ── write helpers ───────────────────────────────────────────────────────────
+
+
+def _settings():
+	return frappe.get_cached_doc("Orion Settings")
+
+
+def _cc_by_line() -> dict:
+	s = _settings()
+	return {
+		"RATUNDA_RENOVASI": s.ratunda_cost_center,
+		"POIESIS_STUDIO": s.poiesis_cost_center,
+	}
+
+
+def _resolve_name(doctype: str, ident):
+	"""Doc name from a legacy Orion id (orion_legacy_id) first, then an
+	ERPNext name — the inverse of how every response id is emitted."""
+	if not ident:
+		return None
+	name = frappe.db.get_value(doctype, {"orion_legacy_id": ident})
+	if not name and frappe.db.exists(doctype, ident):
+		name = ident
+	return name
+
+
+def _legacy_or_name(doctype: str, name):
+	if not name:
+		return None
+	return frappe.db.get_value(doctype, name, "orion_legacy_id") or name
+
+
+def _wdec(v) -> Decimal:
+	"""Payload/db value -> Decimal exactly (None -> 0), like migrate.dec."""
+	if v is None:
+		return Decimal("0")
+	if isinstance(v, Decimal):
+		return v
+	return Decimal(str(v))
+
+
+def _q2(v) -> Decimal:
+	return _wdec(v).quantize(Decimal("0.01"))
+
+
+def _money(v):
+	"""Decimal-exact 2dp value as float for Currency fields."""
+	if v is None:
+		return None
+	return float(_q2(v))
+
+
+def _s2(v) -> str:
+	"""Numeric(15,2) serialization: 2dp JSON string."""
+	return "%.2f" % float(v or 0)
+
+
+def _s2n(v):
+	return None if v is None else "%.2f" % float(v)
+
+
+def _require_account(ident):
+	acc = _resolve_account(ident)
+	if not acc:
+		frappe.throw("Account not found: %s" % ident, exc=frappe.DoesNotExistError)
+	return acc
+
+
+def _account_by_number(code: str):
+	return frappe.db.get_value(
+		"Account",
+		{"company": _company(), "account_number": code, "is_group": 0},
+		["name", "account_name", "account_number", "orion_legacy_id"],
+		as_dict=True,
+	)
+
+
+def _resolve_project_or_throw(ident):
+	name = _resolve_name("Project", ident)
+	if not name:
+		frappe.throw("Project not found: %s" % ident, exc=frappe.DoesNotExistError)
+	return name
+
+
+def _insert_named(doc):
+	"""Insert with a preset doc.name — frappe.flags.in_import makes preset
+	names stick (same mechanism orion.migrate relies on for SI numbers)."""
+	prev = frappe.flags.in_import
+	frappe.flags.in_import = True
+	try:
+		doc.insert()
+	finally:
+		frappe.flags.in_import = prev
+	return doc
+
+
+def _post_journal_entry(
+	*,
+	posting_date,
+	description,
+	reference,
+	source_type,
+	lines,
+	project=None,
+	bank_account_no=None,
+	source_file=None,
+	txn_hash=None,
+	legacy_id=None,
+	reversal_of=None,
+):
+	"""Insert+submit a Journal Entry with migrate/journal_entries.py's field
+	and cost-center conventions. `lines` are dicts: {account (ERPNext name),
+	debit, credit (Decimal), description, and optional cost_center / project /
+	party_type / party overrides}. Cost center per row: account brand line ->
+	brand CC, else the header project's brand CC, else Shared."""
+	settings = _settings()
+	cc_by_line = _cc_by_line()
+	shared_cc = settings.shared_cost_center
+
+	entry_cc = None
+	if project:
+		entry_cc = cc_by_line.get(
+			frappe.db.get_value("Project", project, "orion_business_line")
+		)
+
+	acc_bl = {}
+	for l in lines:
+		if l["account"] not in acc_bl:
+			acc_bl[l["account"]] = frappe.db.get_value(
+				"Account", l["account"], "orion_business_line"
+			)
+
+	doc = frappe.new_doc("Journal Entry")
+	doc.voucher_type = "Journal Entry"
+	doc.company = settings.company
+	doc.posting_date = posting_date
+	if reference:
+		doc.cheque_no = reference
+		doc.cheque_date = posting_date
+	doc.user_remark = description
+	doc.multi_currency = 0
+	doc.orion_source_type = source_type
+	doc.orion_txn_hash = txn_hash
+	doc.orion_bank_account_no = bank_account_no
+	doc.orion_source_file = source_file
+	doc.orion_legacy_id = legacy_id
+	if reversal_of and _has_reversal_of():
+		doc.reversal_of = reversal_of
+
+	for l in lines:
+		bl = acc_bl.get(l["account"])
+		if l.get("cost_center"):
+			cc = l["cost_center"]
+		elif bl in BRAND_LINES:
+			cc = cc_by_line[bl]
+		elif entry_cc:
+			cc = entry_cc
+		else:
+			cc = shared_cc
+		doc.append(
+			"accounts",
+			{
+				"account": l["account"],
+				"debit_in_account_currency": _money(l.get("debit")) or 0,
+				"credit_in_account_currency": _money(l.get("credit")) or 0,
+				"user_remark": l.get("description"),
+				"project": l["project"] if "project" in l else project,
+				"cost_center": cc,
+				"party_type": l.get("party_type"),
+				"party": l.get("party"),
+			},
+		)
+
+	doc.flags.ignore_permissions = True
+	doc.insert()
+	doc.submit()
+	return doc
+
+
+def _assert_balanced(lines, label):
+	"""JournalEntryService.assert_balanced — 0.01 tolerance, same message."""
+	debit = sum((_wdec(l.get("debit")) for l in lines), Decimal("0"))
+	credit = sum((_wdec(l.get("credit")) for l in lines), Decimal("0"))
+	if abs(debit - credit) > Decimal("0.01"):
+		frappe.throw(
+			'Entry "%s" is not balanced (debit %s ≠ credit %s)' % (label, debit, credit)
+		)
+
+
+def _drop_journal_entry(doc):
+	"""Cancel + hard-delete, like migrate/invoices.py drop_journal_entry —
+	the source hard-deletes journal rows too."""
+	doc.flags.ignore_permissions = True
+	if doc.docstatus == 1:
+		doc.cancel()
+	frappe.delete_doc("Journal Entry", doc.name, force=1, ignore_permissions=True)
+
+
+# ── journal entry writes ────────────────────────────────────────────────────
+
+
+def _payload_je_lines(raw_lines) -> list[dict]:
+	return [
+		{
+			"account": _require_account(l.get("accountId")).name,
+			"debit": _wdec(l.get("debit")),
+			"credit": _wdec(l.get("credit")),
+			"description": l.get("description"),
+		}
+		for l in raw_lines
+	]
+
+
+def _entry_max_amount(lines) -> Decimal:
+	"""Node parity: amount = max over lines of max(debit, credit)."""
+	return max(
+		(max(_wdec(l.get("debit")), _wdec(l.get("credit"))) for l in lines),
+		default=Decimal("0"),
+	)
+
+
+def _amount_key(amount: Decimal) -> str:
+	"""Integral amounts render without a fractional part (JS `${amount}`)."""
+	if amount == amount.to_integral_value():
+		return str(int(amount))
+	return str(amount)
+
+
+def _je_create_batch(payload: dict) -> dict:
+	"""POST '' — JournalEntryService.create_batch. Per-entry balance check;
+	BANK_IMPORT entries dedup on the txn hash (payload txnHash, else computed
+	exactly like the source via orion.accounting.txn_hash) with the source's
+	within-batch `|N` collision suffix and the cross-account reference check;
+	residual unique-key collisions on insert are skipped per-row via savepoint
+	(the source's per-row IntegrityError handling). Returns
+	{entries, created, skipped, skippedList}."""
+	entries = payload.get("entries") or []
+	if not entries:
+		frappe.throw("entries is required")
+
+	for e in entries:
+		if not e.get("date") or not e.get("description") or not e.get("lines"):
+			frappe.throw("Each entry needs date, description, and at least one line")
+		_assert_balanced(e["lines"], e["description"])
+
+	hash_map: dict[int, str] = {}
+	for idx, e in enumerate(entries):
+		if (e.get("sourceType") or "MANUAL") != "BANK_IMPORT" or not e.get("bankAccount"):
+			continue
+		if e.get("txnHash"):
+			hash_map[idx] = e["txnHash"]
+		else:
+			date_key = _parse_date(e["date"]).strftime("%Y-%m-%d")
+			amount = _entry_max_amount(e["lines"])
+			hash_map[idx] = compute_txn_hash(
+				e["bankAccount"],
+				date_key,
+				e.get("reference") or "-",
+				float(amount),
+				e["description"],
+			)
+
+	# Disambiguate within-batch hash collisions (shared BCA batch references):
+	# suffix the 2nd+ occurrence with |N, same input order -> same suffixes.
+	hash_counts = Counter(hash_map.values())
+	if any(c > 1 for c in hash_counts.values()):
+		seen: dict[str, int] = {}
+		for idx in sorted(hash_map):
+			h = hash_map[idx]
+			if hash_counts[h] > 1:
+				seen[h] = seen.get(h, 0) + 1
+				if seen[h] > 1:
+					hash_map[idx] = "%s|%s" % (h, seen[h])
+
+	skipped_hashes: set[str] = set()
+	if hash_map:
+		existing = frappe.get_all(
+			"Journal Entry",
+			filters={"orion_txn_hash": ("in", list(hash_map.values()))},
+			pluck="orion_txn_hash",
+		)
+		skipped_hashes.update(h for h in existing if h)
+
+	# Cross-account reference dedup: the same real bank reference + date +
+	# amount already imported (possibly under another account's hash).
+	refs = list(
+		{
+			e.get("reference")
+			for e in entries
+			if (e.get("sourceType") or "MANUAL") == "BANK_IMPORT"
+			and has_real_ref(e.get("reference"))
+		}
+	)
+	if refs:
+		headers = frappe.get_all(
+			"Journal Entry",
+			filters={
+				"cheque_no": ("in", refs),
+				"orion_source_type": "BANK_IMPORT",
+				"docstatus": ("!=", 2),
+			},
+			fields=["name", "cheque_no", "posting_date"],
+		)
+		lines_by_parent: dict[str, list] = {}
+		if headers:
+			for l in frappe.get_all(
+				"Journal Entry Account",
+				filters={"parent": ("in", [h.name for h in headers])},
+				fields=["parent", "debit_in_account_currency", "credit_in_account_currency"],
+			):
+				lines_by_parent.setdefault(l.parent, []).append(l)
+		existing_ref_keys = set()
+		for h in headers:
+			a = max(
+				(
+					max(_wdec(l.debit_in_account_currency), _wdec(l.credit_in_account_currency))
+					for l in lines_by_parent.get(h.name, [])
+				),
+				default=Decimal("0"),
+			)
+			existing_ref_keys.add("%s|%s|%s" % (h.cheque_no, h.posting_date, _amount_key(a)))
+		for idx, e in enumerate(entries):
+			if not has_real_ref(e.get("reference")):
+				continue
+			h = hash_map.get(idx)
+			if not h:
+				continue
+			date_key = _parse_date(e["date"]).strftime("%Y-%m-%d")
+			amount = _entry_max_amount(e["lines"])
+			if "%s|%s|%s" % (e["reference"], date_key, _amount_key(amount)) in existing_ref_keys:
+				skipped_hashes.add(h)
+
+	created: list[str] = []
+	skipped_list: list[str] = []
+	for idx, e in enumerate(entries):
+		h = hash_map.get(idx)
+		date_key = _parse_date(e["date"]).strftime("%Y-%m-%d")
+		if h and h in skipped_hashes:
+			skipped_list.append("%s — %s" % (date_key, e["description"]))
+			continue
+		project = _resolve_project_or_throw(e["projectId"]) if e.get("projectId") else None
+		lines = _payload_je_lines(e["lines"])
+		sp = "orion_je_%s" % idx
+		frappe.db.savepoint(sp)
+		try:
+			doc = _post_journal_entry(
+				posting_date=date_key,
+				description=e["description"],
+				reference=e.get("reference"),
+				source_type=e.get("sourceType") or "MANUAL",
+				lines=lines,
+				project=project,
+				bank_account_no=e.get("bankAccount"),
+				source_file=e.get("sourceFile"),
+				txn_hash=h,
+			)
+		except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
+			frappe.db.rollback(save_point=sp)
+			skipped_list.append("%s — %s" % (date_key, e["description"]))
+			continue
+		created.append(doc.name)
+
+	headers = _je_headers(names=created) if created else []
+	by_name = {r.name: r for r in headers}
+	reads = {r["id"]: r for r in _je_read([by_name[n] for n in created if n in by_name])}
+	ordered = []
+	for n in created:
+		r = by_name.get(n)
+		if r:
+			ordered.append(reads[r.orion_legacy_id or r.name])
+	return {
+		"entries": ordered,
+		"created": len(created),
+		"skipped": len(skipped_list),
+		"skippedList": skipped_list,
+	}
+
+
+def _je_update(ident: str, payload: dict) -> dict:
+	"""PATCH /:id — JournalEntryService.update. MANUAL entries are replaced
+	wholesale: ERPNext forbids editing submitted vouchers in place, so the JE
+	is cancelled+deleted and re-posted from the payload (net GL equals the
+	source's line replacement); the old orion_legacy_id — or, for compat-born
+	entries, the old name — rides along as the new orion_legacy_id so the
+	entry keeps its external id. Non-MANUAL entries only accept projectId
+	(feynman's allocate flow); JE rows and GL entries are restamped."""
+	name = _resolve_name("Journal Entry", ident)
+	if not name:
+		frappe.throw("Not found", exc=frappe.DoesNotExistError)
+	doc = frappe.get_doc("Journal Entry", name)
+	source_type = doc.orion_source_type or "MANUAL"
+
+	if source_type != "MANUAL":
+		if "projectId" in payload:
+			_je_set_project(doc, payload.get("projectId"))
+			return _je_read(_je_headers(name=name))[0]
+		frappe.throw(
+			"Only MANUAL entries can be fully edited. "
+			"Non-MANUAL entries only support projectId updates.",
+			exc=frappe.PermissionError,
+		)
+
+	if not payload.get("date") or not payload.get("description") or not payload.get("lines"):
+		frappe.throw("date, description, and lines are required")
+	_assert_balanced(payload["lines"], doc.user_remark or payload["description"])
+
+	project = _resolve_project_or_throw(payload["projectId"]) if payload.get("projectId") else None
+	lines = _payload_je_lines(payload["lines"])
+	legacy = doc.orion_legacy_id or doc.name
+	bank_no = doc.orion_bank_account_no
+	source_file = doc.orion_source_file
+	txn_hash = doc.orion_txn_hash
+	_drop_journal_entry(doc)
+
+	new_doc = _post_journal_entry(
+		posting_date=_parse_date(payload["date"]).date(),
+		description=payload["description"],
+		reference=payload.get("reference"),
+		source_type="MANUAL",
+		lines=lines,
+		project=project,
+		bank_account_no=bank_no,
+		source_file=source_file,
+		txn_hash=txn_hash,
+		legacy_id=legacy,
+	)
+	return _je_read(_je_headers(name=new_doc.name))[0]
+
+
+def _je_set_project(doc, project_ident):
+	"""Non-MANUAL projectId-only update: restamp JE rows and posted GL.
+	Project does not touch TB parity — only per-project reporting."""
+	project = _resolve_project_or_throw(project_ident) if project_ident else None
+	frappe.db.sql(
+		"update `tabJournal Entry Account` set project = %s where parent = %s",
+		(project, doc.name),
+	)
+	frappe.db.sql(
+		"""update `tabGL Entry` set project = %s
+		where voucher_type = 'Journal Entry' and voucher_no = %s""",
+		(project, doc.name),
+	)
+
+
+def _je_delete(ident: str) -> dict:
+	"""DELETE /:id — MANUAL only (source PermissionError message), then
+	cancel + hard delete like the source's row delete."""
+	name = _resolve_name("Journal Entry", ident)
+	if not name:
+		frappe.throw("Not found", exc=frappe.DoesNotExistError)
+	doc = frappe.get_doc("Journal Entry", name)
+	if (doc.orion_source_type or "MANUAL") != "MANUAL":
+		frappe.throw("Only MANUAL entries can be deleted", exc=frappe.PermissionError)
+	_drop_journal_entry(doc)
+	return {"success": True}
+
+
+def _je_reverse(ident: str, payload: dict) -> dict:
+	"""POST /:id/reverse — JournalEntryService.reverse + the je_events
+	cascade. The reversal copies every row with Dr/Cr swapped (same account,
+	cost center, project, party) and links reversal_of. Cascades: LOAN_* JEs
+	delete the Orion Loan Event backed by the entry and resync the loan;
+	CASH_ADVANCE reverts the Orion Cash Advance to APPROVED. AR_INVOICE has no
+	doc cascade here — invoice GL lives on Sales Invoice / Payment Entry docs
+	in ERPNext, and rows referencing an SI cannot carry the reference on the
+	flipped (debit) side, so the reversal restores the account balance but not
+	the SI allocation; cancel the Payment Entry in ERPNext instead."""
+	name = _resolve_name("Journal Entry", ident)
+	if not name:
+		frappe.throw("Journal entry not found", exc=frappe.DoesNotExistError)
+	doc = frappe.get_doc("Journal Entry", name)
+	if _has_reversal_of():
+		if doc.get("reversal_of"):
+			frappe.throw("Tidak dapat membatalkan entri reversal")
+		if frappe.db.exists("Journal Entry", {"reversal_of": doc.name, "docstatus": ("!=", 2)}):
+			frappe.throw("Entri jurnal ini sudah pernah dibatalkan")
+
+	rev_dt = _parse_date(payload.get("date"))
+	rev_date = rev_dt.date() if rev_dt else frappe.utils.nowdate()
+	reason = payload.get("reason") or "Pembatalan: %s" % (doc.user_remark or "")
+
+	lines = []
+	for row in doc.accounts:
+		lines.append(
+			{
+				"account": row.account,
+				"debit": _wdec(row.credit_in_account_currency),  # swap
+				"credit": _wdec(row.debit_in_account_currency),  # swap
+				"description": row.user_remark,
+				"cost_center": row.cost_center,
+				"project": row.project,
+				"party_type": row.party_type,
+				"party": row.party,
+			}
+		)
+	reversal = _post_journal_entry(
+		posting_date=rev_date,
+		description=reason,
+		reference=doc.cheque_no,
+		source_type=doc.orion_source_type,
+		lines=lines,
+		reversal_of=doc.name,
+	)
+
+	if doc.orion_source_type in ("LOAN_PAYMENT", "LOAN_DRAWDOWN"):
+		event = frappe.db.get_value(
+			"Orion Loan Event", {"journal_entry": doc.name}, ["name", "loan"], as_dict=True
+		)
+		if event:
+			frappe.delete_doc("Orion Loan Event", event.name, force=1, ignore_permissions=True)
+			_sync_loan_status(frappe.get_doc("Orion Loan", event.loan))
+	elif doc.orion_source_type == "CASH_ADVANCE":
+		ca = frappe.db.get_value("Orion Cash Advance", {"journal_entry": doc.name})
+		if ca:
+			frappe.db.set_value(
+				"Orion Cash Advance",
+				ca,
+				{"status": "APPROVED", "transfer_date": None, "journal_entry": None},
+			)
+
+	return _je_read(_je_headers(name=reversal.name))[0]

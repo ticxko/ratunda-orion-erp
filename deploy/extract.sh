@@ -53,6 +53,16 @@ TABLES=(
   voucher_types
   subscriptions
   bank_statement_jobs
+  purchase_orders
+  po_items
+  # NOTE: there is NO price-library table. The Node endpoint
+  # /api/supply-chain/price-library (routes/supply-chain/price-library.ts) is a
+  # live SQL aggregation over field_receipt_items JOIN field_receipts (both
+  # already in this list). Nothing extra to extract.
+  # employees + employee_attachments (public schema, Node HR router) were also
+  # missing from the first extract; plan step 5 needs them.
+  employees
+  employee_attachments
 )
 
 mkdir -p "$OUT_DIR"
