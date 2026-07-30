@@ -40,7 +40,7 @@ from decimal import Decimal
 
 import frappe
 
-from orion.accounting.loan_codes import next_doc_code
+from orion.accounting.loan_codes import next_doc_code, recompute_outstanding
 from orion.accounting.txn_hash import compute_txn_hash, has_real_ref
 from orion.compat.handle import route, split_path
 
@@ -981,6 +981,23 @@ def _drop_journal_entry(doc):
 	frappe.delete_doc("Journal Entry", doc.name, force=1, ignore_permissions=True)
 
 
+def _resync_loan_status(loan):
+	"""Recompute an Orion Loan's status from its remaining events after one is
+	removed (JE reversal). Outstanding itself is event-sourced (never stored);
+	only the ACTIVE/PAID_OFF flag is persisted. Revolving loans stay ACTIVE."""
+	# recompute_outstanding unpacks (direction, principal_amount) pairs — plain
+	# tuples, not dicts
+	rows = frappe.db.sql(
+		"""SELECT direction, SUM(principal_amount)
+		FROM `tabOrion Loan Event` WHERE loan = %s GROUP BY direction""",
+		loan,
+	)
+	outstanding = recompute_outstanding(rows)
+	is_revolving = frappe.db.get_value("Orion Loan", loan, "is_revolving")
+	status = "ACTIVE" if is_revolving or outstanding > Decimal("0.01") else "PAID_OFF"
+	frappe.db.set_value("Orion Loan", loan, "status", status, update_modified=False)
+
+
 # ── journal entry writes ────────────────────────────────────────────────────
 
 
@@ -1293,7 +1310,7 @@ def _je_reverse(ident: str, payload: dict) -> dict:
 		)
 		if event:
 			frappe.delete_doc("Orion Loan Event", event.name, force=1, ignore_permissions=True)
-			_sync_loan_status(frappe.get_doc("Orion Loan", event.loan))
+			_resync_loan_status(event.loan)
 	elif doc.orion_source_type == "CASH_ADVANCE":
 		ca = frappe.db.get_value("Orion Cash Advance", {"journal_entry": doc.name})
 		if ca:
