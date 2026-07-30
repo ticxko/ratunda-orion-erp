@@ -1,0 +1,224 @@
+{
+ "actions": [],
+ "autoname": "field:code",
+ "creation": "2026-07-30 09:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "code",
+  "ca_type",
+  "title",
+  "project",
+  "column_break_identity",
+  "status",
+  "business_line",
+  "requested_by",
+  "prepared_by",
+  "section_break_transfer",
+  "target_bank_account",
+  "transfer_date",
+  "column_break_transfer",
+  "total_amount",
+  "journal_entry",
+  "section_break_transfer_note",
+  "keterangan_transfer",
+  "section_break_items",
+  "items",
+  "section_break_detail",
+  "source_file",
+  "physical_id",
+  "notes",
+  "section_break_legacy",
+  "orion_legacy_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Code",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "CA",
+   "fieldname": "ca_type",
+   "fieldtype": "Select",
+   "label": "CA Type",
+   "options": "CAU\nCAM\nCAO\nCA"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title"
+  },
+  {
+   "fieldname": "project",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Project",
+   "options": "Project"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "DRAFT",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "DRAFT\nAPPROVED\nTRANSFERRED\nSETTLED\nCANCELLED"
+  },
+  {
+   "fieldname": "business_line",
+   "fieldtype": "Select",
+   "label": "Business Line",
+   "options": "ALL\nRATUNDA_RENOVASI\nPOIESIS_STUDIO"
+  },
+  {
+   "fieldname": "requested_by",
+   "fieldtype": "Data",
+   "label": "Requested By"
+  },
+  {
+   "fieldname": "prepared_by",
+   "fieldtype": "Data",
+   "label": "Prepared By"
+  },
+  {
+   "fieldname": "section_break_transfer",
+   "fieldtype": "Section Break",
+   "label": "Transfer"
+  },
+  {
+   "fieldname": "target_bank_account",
+   "fieldtype": "Link",
+   "label": "Target Bank Account",
+   "options": "Bank Account"
+  },
+  {
+   "fieldname": "transfer_date",
+   "fieldtype": "Date",
+   "label": "Transfer Date"
+  },
+  {
+   "fieldname": "column_break_transfer",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Total Amount"
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "label": "Journal Entry",
+   "options": "Journal Entry"
+  },
+  {
+   "fieldname": "section_break_transfer_note",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "keterangan_transfer",
+   "fieldtype": "Small Text",
+   "label": "Keterangan Transfer"
+  },
+  {
+   "fieldname": "section_break_items",
+   "fieldtype": "Section Break",
+   "label": "Items"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Items",
+   "options": "Orion Cash Advance Item"
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "fieldname": "source_file",
+   "fieldtype": "Data",
+   "label": "Source File"
+  },
+  {
+   "fieldname": "physical_id",
+   "fieldtype": "Data",
+   "label": "Physical ID"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "section_break_legacy",
+   "fieldtype": "Section Break",
+   "label": "Legacy"
+  },
+  {
+   "fieldname": "orion_legacy_id",
+   "fieldtype": "Data",
+   "label": "Orion Legacy ID",
+   "unique": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-07-30 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Cash Advance",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Project Admin",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -10,6 +10,7 @@ from orion.migrate import (
 	coa,
 	company,
 	customers,
+	invoices,
 	journal_entries,
 	leads,
 	programs,
@@ -34,6 +35,7 @@ STEPS = [
 	("projects", projects),
 	("termins", termins),
 	("journal_entries", journal_entries),
+	("invoices", invoices),
 	("validate", validate),
 ]
 

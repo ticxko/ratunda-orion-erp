@@ -1,0 +1,212 @@
+{
+ "actions": [],
+ "autoname": "field:loan_number",
+ "creation": "2026-07-30 09:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "loan_number",
+  "lender_type",
+  "lender_name",
+  "bank_name",
+  "column_break_identity",
+  "status",
+  "business_line",
+  "is_revolving",
+  "is_company_liability",
+  "doc_prefix",
+  "section_break_terms",
+  "account",
+  "principal",
+  "interest_rate",
+  "monthly_installment",
+  "column_break_terms",
+  "tenor_months",
+  "start_date",
+  "maturity_date",
+  "section_break_notes",
+  "notes",
+  "section_break_legacy",
+  "orion_legacy_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "loan_number",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Loan Number",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "BANK",
+   "fieldname": "lender_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Lender Type",
+   "options": "BANK\nOWNER\nTHIRD_PARTY"
+  },
+  {
+   "fieldname": "lender_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Lender Name"
+  },
+  {
+   "fieldname": "bank_name",
+   "fieldtype": "Data",
+   "label": "Bank Name"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "ACTIVE",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "ACTIVE\nPAID_OFF"
+  },
+  {
+   "default": "ALL",
+   "fieldname": "business_line",
+   "fieldtype": "Select",
+   "label": "Business Line",
+   "options": "ALL\nRATUNDA_RENOVASI\nPOIESIS_STUDIO"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_revolving",
+   "fieldtype": "Check",
+   "label": "Is Revolving"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_company_liability",
+   "fieldtype": "Check",
+   "label": "Is Company Liability"
+  },
+  {
+   "description": "Document-code prefix used to auto-number drawdown events, e.g. PTPOI-CL",
+   "fieldname": "doc_prefix",
+   "fieldtype": "Data",
+   "label": "Doc Prefix"
+  },
+  {
+   "fieldname": "section_break_terms",
+   "fieldtype": "Section Break",
+   "label": "Terms"
+  },
+  {
+   "fieldname": "account",
+   "fieldtype": "Link",
+   "label": "Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "principal",
+   "fieldtype": "Currency",
+   "label": "Principal"
+  },
+  {
+   "fieldname": "interest_rate",
+   "fieldtype": "Percent",
+   "label": "Interest Rate"
+  },
+  {
+   "fieldname": "monthly_installment",
+   "fieldtype": "Currency",
+   "label": "Monthly Installment"
+  },
+  {
+   "fieldname": "column_break_terms",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "tenor_months",
+   "fieldtype": "Int",
+   "label": "Tenor (Months)"
+  },
+  {
+   "fieldname": "start_date",
+   "fieldtype": "Date",
+   "label": "Start Date"
+  },
+  {
+   "fieldname": "maturity_date",
+   "fieldtype": "Date",
+   "label": "Maturity Date"
+  },
+  {
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "section_break_legacy",
+   "fieldtype": "Section Break",
+   "label": "Legacy"
+  },
+  {
+   "fieldname": "orion_legacy_id",
+   "fieldtype": "Data",
+   "label": "Orion Legacy ID",
+   "unique": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-07-30 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Loan",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Project Admin",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

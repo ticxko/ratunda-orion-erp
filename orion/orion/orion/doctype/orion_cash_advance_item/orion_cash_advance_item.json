@@ -1,0 +1,101 @@
+{
+ "actions": [],
+ "creation": "2026-07-30 09:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "tahap_pekerjaan",
+  "item",
+  "spek_ukuran",
+  "category",
+  "volume",
+  "satuan",
+  "durasi_value",
+  "durasi_unit",
+  "unit_price",
+  "amount",
+  "gl_account_code",
+  "sort_order"
+ ],
+ "fields": [
+  {
+   "fieldname": "tahap_pekerjaan",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tahap Pekerjaan"
+  },
+  {
+   "fieldname": "item",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Item"
+  },
+  {
+   "fieldname": "spek_ukuran",
+   "fieldtype": "Data",
+   "label": "Spek / Ukuran"
+  },
+  {
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Category",
+   "options": "MATERIAL\nUPAH\nOPERASIONAL\nTRANSPORT"
+  },
+  {
+   "fieldname": "volume",
+   "fieldtype": "Float",
+   "label": "Volume"
+  },
+  {
+   "fieldname": "satuan",
+   "fieldtype": "Data",
+   "label": "Satuan"
+  },
+  {
+   "fieldname": "durasi_value",
+   "fieldtype": "Data",
+   "label": "Durasi Value"
+  },
+  {
+   "fieldname": "durasi_unit",
+   "fieldtype": "Data",
+   "label": "Durasi Unit"
+  },
+  {
+   "fieldname": "unit_price",
+   "fieldtype": "Currency",
+   "label": "Unit Price"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount"
+  },
+  {
+   "fieldname": "gl_account_code",
+   "fieldtype": "Data",
+   "label": "GL Account Code"
+  },
+  {
+   "fieldname": "sort_order",
+   "fieldtype": "Int",
+   "label": "Sort Order"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-07-30 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Cash Advance Item",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
