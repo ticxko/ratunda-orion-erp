@@ -10,6 +10,8 @@ role is the legacy string ADMIN | PROJECT_ADMIN, mapped from Frappe roles.
 import frappe
 from frappe.auth import LoginManager
 
+from orion.compat.handle import route, split_path
+
 ROLE_MAP = [
     ("Orion Admin", "ADMIN"),
     ("Orion Project Admin", "PROJECT_ADMIN"),
@@ -53,7 +55,9 @@ def login(email: str, password: str):
 def me():
     if frappe.session.user in ("Guest", "", None):
         raise frappe.AuthenticationError
-    return user_payload(frappe.session.user)
+    # include a fresh CSRF token so a reloaded SPA can re-arm gateway POSTs
+    # (this GET needs no CSRF itself)
+    return {**user_payload(frappe.session.user), "csrf_token": frappe.sessions.get_csrf_token()}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -61,3 +65,16 @@ def logout():
     frappe.local.login_manager.logout()
     frappe.db.commit()
     return {}
+
+
+# Views that call api('/api/auth/me' | '/logout') route through the gateway;
+# expose those two here (login stays a direct guest call in auth.ts).
+@route("/api/auth")
+def auth_gateway(path, verb, payload):
+    bare, _ = split_path(path)
+    tail = bare[len("/api/auth"):].strip("/")
+    if tail == "me":
+        return {**user_payload(frappe.session.user), "csrf_token": frappe.sessions.get_csrf_token()}
+    if tail == "logout":
+        return logout()
+    frappe.throw("No compat handler for %s" % bare, exc=frappe.DoesNotExistError)
