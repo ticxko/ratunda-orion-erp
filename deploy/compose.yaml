@@ -1,0 +1,142 @@
+# Orion ERPNext stack — kvm4 (/opt/erpnext)
+# Modeled on frappe_docker compose + mariadb/redis/noproxy overrides.
+# Frontend bound to 127.0.0.1:8080 only; host nginx terminates TLS.
+# DB/Redis intentionally unpublished (host already runs MySQL :3306, Redis :6379).
+
+x-app-image: &app_image
+  image: ${ERPNEXT_IMAGE:-frappe/erpnext}:${ERPNEXT_VERSION:?}
+  restart: unless-stopped
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+  networks:
+    - frappe
+
+services:
+  db:
+    image: mariadb:10.6
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+      - --innodb-buffer-pool-size=1536M
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: mysqladmin ping -h localhost --password=${DB_PASSWORD}
+      interval: 5s
+      retries: 20
+    mem_limit: 2560m
+    networks:
+      - frappe
+
+  redis-cache:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    networks:
+      - frappe
+
+  redis-queue:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+    mem_limit: 256m
+    networks:
+      - frappe
+
+  configurator:
+    <<: *app_image
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: "9000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    <<: *app_image
+    mem_limit: 1536m
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *app_image
+    command: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: $$host
+      UPSTREAM_REAL_IP_ADDRESS: 172.16.0.0/12
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      CLIENT_MAX_BODY_SIZE: 60m
+      PROXY_READ_TIMEOUT: "120"
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 256m
+    depends_on:
+      - backend
+      - websocket
+
+  websocket:
+    <<: *app_image
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    mem_limit: 320m
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  queue-short:
+    <<: *app_image
+    command: ["bench", "worker", "--queue", "short,default"]
+    mem_limit: 512m
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  # Long queue runs the heavy bespoke work later (Claude statement parses, WeasyPrint).
+  queue-long:
+    <<: *app_image
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    mem_limit: 1024m
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *app_image
+    command: ["bench", "schedule"]
+    mem_limit: 320m
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:
+  redis-queue-data:
+  sites:
+  logs:
+
+networks:
+  frappe:

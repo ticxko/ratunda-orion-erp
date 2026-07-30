@@ -1,0 +1,18 @@
+[
+ {
+  "doctype": "Role",
+  "name": "Orion Admin",
+  "role_name": "Orion Admin",
+  "desk_access": 1,
+  "is_custom": 1,
+  "disabled": 0
+ },
+ {
+  "doctype": "Role",
+  "name": "Orion Project Admin",
+  "role_name": "Orion Project Admin",
+  "desk_access": 1,
+  "is_custom": 1,
+  "disabled": 0
+ }
+]
