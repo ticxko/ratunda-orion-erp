@@ -44,6 +44,11 @@ def run():
 		doc.orion_estimated_value = money(r.get("estimated_value"))
 		doc.orion_short_name = r.get("short_name")
 		doc.orion_lead_status = r["status"]
+		doc.orion_client_salutation = r.get("client_salutation")
+		doc.orion_client_address = r.get("client_address")
+		doc.orion_source = r.get("source")
+		doc.orion_assigned_to = r.get("assigned_to")
+		doc.orion_notes = r.get("notes")
 		doc.orion_legacy_id = r["id"]
 		doc.flags.ignore_permissions = True
 		doc.insert()

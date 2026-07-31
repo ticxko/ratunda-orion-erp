@@ -96,9 +96,12 @@ LEAD_FIELDS = [
     "name", "lead_name", "phone", "status", "creation", "modified",
     "orion_business_line", "orion_service_interest", "orion_estimated_value",
     "orion_short_name", "orion_lead_status", "orion_legacy_id",
+    "orion_client_salutation", "orion_client_address", "orion_source",
+    "orion_assigned_to", "orion_notes",
 ]
 CUSTOMER_FIELDS = [
     "name", "customer_name", "disabled", "orion_legacy_id", "creation", "modified",
+    "orion_salutation", "orion_phone", "orion_email", "orion_address", "orion_notes",
 ]
 PROJECT_FIELDS = [
     "name", "project_name", "status", "expected_start_date", "expected_end_date",
@@ -233,17 +236,16 @@ def _lead_read(r) -> dict:
         "leadCode": r.name,
         "shortName": r.orion_short_name,
         "clientName": r.lead_name,
-        # migrate/leads.py dropped salutation/address; no Lead field carries them.
-        "clientSalutation": None,
+        "clientSalutation": r.orion_client_salutation,
         "clientPhone": r.phone,
-        "clientAddress": None,
+        "clientAddress": r.orion_client_address,
         "businessLine": r.orion_business_line or "RATUNDA_RENOVASI",
         "serviceInterest": r.orion_service_interest,
         "estimatedValue": _s2n(r.orion_estimated_value),
-        "source": None,
+        "source": r.orion_source,
         "status": r.orion_lead_status or "PROSPECT",
-        "assignedTo": None,
-        "notes": None,
+        "assignedTo": r.orion_assigned_to,
+        "notes": r.orion_notes,
         "clientId": None,
         "createdAt": _iso(r.creation),
         "updatedAt": _iso(r.modified),
@@ -380,12 +382,11 @@ def _client_read(r) -> dict:
     return {
         "id": r.orion_legacy_id or r.name,
         "name": r.customer_name,
-        # Customer carries none of these (migrate stored only customer_name).
-        "salutation": "Pak",
-        "phone": None,
-        "email": None,
-        "address": None,
-        "notes": None,
+        "salutation": r.orion_salutation or "Pak",
+        "phone": r.orion_phone,
+        "email": r.orion_email,
+        "address": r.orion_address,
+        "notes": r.orion_notes,
         "isActive": not r.disabled,
         "createdAt": _iso(r.creation),
         "updatedAt": _iso(r.modified),

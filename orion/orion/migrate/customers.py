@@ -35,6 +35,11 @@ def run():
 		doc.customer_group = group
 		doc.territory = territory
 		doc.disabled = 0 if r.get("is_active", True) else 1
+		doc.orion_salutation = r.get("salutation")
+		doc.orion_phone = r.get("phone")
+		doc.orion_email = r.get("email")
+		doc.orion_address = r.get("address")
+		doc.orion_notes = r.get("notes")
 		doc.orion_legacy_id = r["id"]
 		doc.flags.ignore_permissions = True
 		doc.insert()
