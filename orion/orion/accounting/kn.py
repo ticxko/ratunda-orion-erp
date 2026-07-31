@@ -153,14 +153,10 @@ def next_kn_sequence(business_line, year=None):
 		year = date.today().year
 	yy = "%02d" % (int(year) % 100)
 	line = "POIESIS_STUDIO" if business_line == "POIESIS_STUDIO" else "RATUNDA_RENOVASI"
-	rows = frappe.get_all(
-		"Project",
-		filters={
-			"orion_business_line": line,
-			"kontrak_yymm": ("like", yy + "%"),
-			"kn_sequence": ("is", "set"),
-		},
-		fields=["max(kn_sequence) as last"],
-	)
-	last = rows[0].last if rows and rows[0].last else 0
-	return int(last) + 1
+	# v16 rejects SQL functions passed as get_all field strings — use raw SQL
+	last = frappe.db.sql(
+		"""SELECT MAX(kn_sequence) FROM `tabProject`
+		WHERE orion_business_line = %s AND kontrak_yymm LIKE %s AND kn_sequence IS NOT NULL""",
+		(line, yy + "%"),
+	)[0][0]
+	return int(last or 0) + 1
