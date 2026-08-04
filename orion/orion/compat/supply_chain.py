@@ -947,7 +947,40 @@ def _receipt_detail(ident: str) -> dict:
 	# backfills them from the legacy uploads tree); files_note stays as the audit
 	# trail of the original local paths.
 	out["files"] = _receipt_files(name, receipt_id)
+	out["expenseReportLines"] = _expense_report_backlinks(name)
 	return {"receipt": out}
+
+
+def _expense_report_backlinks(fr_name: str) -> list:
+	"""Reverse of Orion Project Expense Line.field_receipt — surfaces which
+	Laporan Pengeluaran Proyek line(s) tag this Nota. Child rows carry .parent
+	(the report), so no schema change is needed."""
+	lines = frappe.get_all(
+		"Orion Project Expense Line",
+		filters={"field_receipt": fr_name, "parenttype": "Orion Project Expense Report"},
+		fields=["parent", "section", "item", "line_date", "debit"],
+	)
+	if not lines:
+		return []
+	reports = {
+		r.name: r
+		for r in frappe.get_all(
+			"Orion Project Expense Report",
+			filters={"name": ("in", list({l.parent for l in lines}))},
+			fields=["name", "code", "orion_legacy_id"],
+		)
+	}
+	return [
+		{
+			"reportId": (reports.get(l.parent) or {}).get("orion_legacy_id") or l.parent,
+			"reportCode": (reports.get(l.parent) or {}).get("code"),
+			"section": l.section,
+			"item": l.item,
+			"date": _iso_date(l.line_date),
+			"debit": _dec2(l.debit),
+		}
+		for l in lines
+	]
 
 
 def _receipt_read(r) -> dict:
