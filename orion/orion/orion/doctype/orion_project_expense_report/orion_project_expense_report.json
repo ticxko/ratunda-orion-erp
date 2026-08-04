@@ -1,0 +1,161 @@
+{
+ "actions": [],
+ "autoname": "field:code",
+ "creation": "2026-08-05 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "code",
+  "project",
+  "title",
+  "column_break_identity",
+  "status",
+  "business_line",
+  "prepared_by",
+  "authorized_by",
+  "section_break_lines",
+  "lines",
+  "section_break_detail",
+  "notes",
+  "section_break_legacy",
+  "orion_legacy_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Code",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "project",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Project",
+   "options": "Project",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "DRAFT",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "DRAFT\nAUTHORIZED"
+  },
+  {
+   "fieldname": "business_line",
+   "fieldtype": "Select",
+   "label": "Business Line",
+   "options": "ALL\nRATUNDA_RENOVASI\nPOIESIS_STUDIO"
+  },
+  {
+   "fieldname": "prepared_by",
+   "fieldtype": "Data",
+   "label": "Prepared By"
+  },
+  {
+   "fieldname": "authorized_by",
+   "fieldtype": "Data",
+   "label": "Authorized By"
+  },
+  {
+   "fieldname": "section_break_lines",
+   "fieldtype": "Section Break",
+   "label": "Ledger"
+  },
+  {
+   "fieldname": "lines",
+   "fieldtype": "Table",
+   "label": "Lines",
+   "options": "Orion Project Expense Line"
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "section_break_legacy",
+   "fieldtype": "Section Break",
+   "label": "Legacy"
+  },
+  {
+   "fieldname": "orion_legacy_id",
+   "fieldtype": "Data",
+   "label": "Orion Legacy ID",
+   "unique": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-08-05 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Project Expense Report",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Project Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
