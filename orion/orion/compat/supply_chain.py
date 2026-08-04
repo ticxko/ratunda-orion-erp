@@ -31,6 +31,7 @@ Deliberate gaps, all called out inline:
     path, throw not-implemented (linking goes through /programs).
 """
 
+import mimetypes
 from datetime import date, datetime
 
 import frappe
@@ -942,9 +943,10 @@ def _receipt_detail(ident: str) -> dict:
 		}
 		for i in items
 	]
-	# scan binaries were not migrated (Orion Field Receipt keeps a files_note
-	# text instead) — serve the source-shaped empty list
-	out["files"] = []
+	# scan binaries live as private File attachments (attach_field_receipt_files.py
+	# backfills them from the legacy uploads tree); files_note stays as the audit
+	# trail of the original local paths.
+	out["files"] = _receipt_files(name, receipt_id)
 	return {"receipt": out}
 
 
@@ -1100,6 +1102,44 @@ def price_library(path: str, verb: str, payload: dict):
 
 
 # ── shared helpers ──────────────────────────────────────────────────────────
+
+
+# Extensions the legacy nota uploader accepted that mimetypes may not know.
+_EXTRA_MIME = {".heic": "image/heic", ".heif": "image/heif", ".webp": "image/webp"}
+
+
+def _mime_from_name(filename: str) -> str:
+	if not filename or "." not in filename:
+		return "application/octet-stream"
+	ext = "." + filename.rsplit(".", 1)[1].lower()
+	return _EXTRA_MIME.get(ext) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def _receipt_files(fr_name: str, receipt_id: str) -> list:
+	"""Scan attachments for a field receipt, shaped like the legacy
+	FieldReceiptFile wire object (receipts.ts). `url` is the Frappe file_url the
+	SPA loads directly; private files are gated on Orion Field Receipt read, which
+	every Orion role holds."""
+	rows = frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": "Orion Field Receipt", "attached_to_name": fr_name},
+		fields=["name", "file_name", "file_url", "file_size", "creation"],
+		order_by="creation asc, file_name asc",
+	)
+	return [
+		{
+			"id": f.name,
+			"fieldReceiptId": receipt_id,
+			"filename": f.file_name,
+			"originalName": f.file_name,
+			"mimeType": _mime_from_name(f.file_name),
+			"fileSize": f.file_size or 0,
+			"url": f.file_url,
+			"gdriveSynced": False,
+			"uploadedAt": _iso(f.creation),
+		}
+		for f in rows
+	]
 
 
 def _dec2(value) -> str | None:
