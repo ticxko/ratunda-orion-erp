@@ -110,7 +110,7 @@ def _report_read(name: str) -> dict:
 	for r in rows:
 		s = r.section if r.section in SECTIONS else "PROYEK"
 		deb, cred = _wdec(r.debit), _wdec(r.credit)
-		running[s] += cred - deb  # CREDIT (inflow) adds, DEBIT (outflow) draws down
+		running[s] += deb - cred  # DEBIT adds (positive), CREDIT subtracts (negative)
 		sections[s]["debit"] += deb
 		sections[s]["credit"] += cred
 		sections[s]["lines"].append(
@@ -137,8 +137,8 @@ def _report_read(name: str) -> dict:
 		)
 
 	proyek = sections["PROYEK"]
-	net = proyek["credit"] - proyek["debit"]
-	margin = float(net / proyek["credit"] * 100) if proyek["credit"] else 0.0
+	net = proyek["debit"] - proyek["credit"]  # saldo: DEBIT positive, CREDIT negative
+	margin = float(net / proyek["debit"] * 100) if proyek["debit"] else 0.0  # saldo / total debit
 	return {
 		"id": d.orion_legacy_id or d.name,
 		"code": d.code,
@@ -155,7 +155,7 @@ def _report_read(name: str) -> dict:
 				"lines": v["lines"],
 				"totalDebit": _s2(v["debit"]),
 				"totalCredit": _s2(v["credit"]),
-				"balance": _s2(v["credit"] - v["debit"]),
+				"balance": _s2(v["debit"] - v["credit"]),
 			}
 			for s, v in sections.items()
 		},
