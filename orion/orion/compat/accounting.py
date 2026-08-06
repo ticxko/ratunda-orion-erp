@@ -1162,6 +1162,11 @@ def _je_create_batch(payload: dict) -> dict:
 			continue
 		created.append(doc.name)
 
+	# Refresh monthly statement-coverage cells for any BANK_IMPORT account/month
+	# just posted, so the Bank Statement Record screen reflects the new tagging
+	# without a full rescan. Best-effort — never let it break the batch.
+	_mark_coverage_dirty(entries)
+
 	headers = _je_headers(names=created) if created else []
 	by_name = {r.name: r for r in headers}
 	reads = {r["id"]: r for r in _je_read([by_name[n] for n in created if n in by_name])}
@@ -1176,6 +1181,29 @@ def _je_create_batch(payload: dict) -> dict:
 		"skipped": len(skipped_list),
 		"skippedList": skipped_list,
 	}
+
+
+def _mark_coverage_dirty(entries: list) -> None:
+	"""Recompute statement-coverage cells for the BANK_IMPORT account/months in
+	this batch. Best-effort; coverage is advisory and must not break posting."""
+	try:
+		from orion.accounting import statement_coverage
+
+		by_account: dict[str, set] = {}
+		for e in entries:
+			if (e.get("sourceType") or "MANUAL") != "BANK_IMPORT":
+				continue
+			acct = e.get("bankAccount")
+			if not acct or not e.get("date"):
+				continue
+			by_account.setdefault(acct, set()).add(str(e["date"])[:10])
+		for acct, dates in by_account.items():
+			statement_coverage.mark_dirty(acct, dates)
+	except Exception:
+		frappe.log_error(
+			title="Bank statement coverage dirty hook failed (journal-entries)",
+			message=frappe.get_traceback(),
+		)
 
 
 def _je_update(ident: str, payload: dict) -> dict:

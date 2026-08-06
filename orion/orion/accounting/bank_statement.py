@@ -816,12 +816,36 @@ def approve(name, entries):
 			_create_bank_transaction(entry, h, je, job, settings)
 		created.append(je.name)
 
+	# Refresh statement-coverage cells for the account/months just recorded, so
+	# the Bank Statement Record screen reflects this import without a full rescan.
+	_mark_coverage_dirty(entries)
+
 	return {
 		"created": len(created),
 		"skipped": len(skipped_list),
 		"skippedList": skipped_list,
 		"journalEntries": created,
 	}
+
+
+def _mark_coverage_dirty(entries):
+	"""Best-effort recompute of statement-coverage cells for the BANK_IMPORT
+	account/months in this batch. Coverage is advisory — never raise here."""
+	try:
+		from orion.accounting import statement_coverage
+
+		by_account = {}
+		for e in entries:
+			if e.get("sourceType") != "BANK_IMPORT" or not e.get("bankAccount") or not e.get("date"):
+				continue
+			by_account.setdefault(e["bankAccount"], set()).add(str(e["date"])[:10])
+		for acct, dates in by_account.items():
+			statement_coverage.mark_dirty(acct, dates)
+	except Exception:
+		frappe.log_error(
+			title="Bank statement coverage dirty hook failed (approve)",
+			message=frappe.get_traceback(),
+		)
 
 
 def _entry_max_amount(lines):
