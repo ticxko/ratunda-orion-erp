@@ -8,6 +8,7 @@ from orion.compat import accounting  # noqa: E402,F401
 from orion.compat import accounting_reports  # noqa: E402,F401
 from orion.compat import accounting_writes  # noqa: E402,F401
 from orion.compat import bank_statement  # noqa: E402,F401
+from orion.compat import bank_statement_coverage  # noqa: E402,F401
 from orion.compat import supply_chain  # noqa: E402,F401
 from orion.compat import expense_report  # noqa: E402,F401
 from orion.compat import reconciliation_it  # noqa: E402,F401

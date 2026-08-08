@@ -268,6 +268,14 @@ def _report_transition(ident: str, need: str, to: str, message: str) -> dict:
 	return _report_read(d.name)
 
 
+PROJECT_STATUS_ID = {
+	"Open": "AKTIF",
+	"Completed": "SELESAI",
+	"On hold": "DITUNDA",
+	"Cancelled": "BATAL",
+}
+
+
 @frappe.whitelist(methods=["GET"])
 def export_xlsx(reportId: str):
 	"""Direct binary download (the JSON gateway can't stream files). Builds the
@@ -280,49 +288,31 @@ def export_xlsx(reportId: str):
 		frappe.throw("Not found", exc=frappe.DoesNotExistError)
 	data = _report_read(name)
 
+	import os
 	from io import BytesIO
 
-	from openpyxl import Workbook
-	from openpyxl.styles import Font
+	from orion.compat.expense_report_xlsx import build_workbook
 
-	brand = {
-		"RATUNDA_RENOVASI": "RATUNDA",
-		"POIESIS_STUDIO": "POIESIS",
-	}.get(data.get("businessLine"), "RATUNDA / POIESIS")
-	proj = data.get("project") or {}
-	headers = [
-		"DATE", "INVOICE NO", "PURCHASE NO", "ITEM", "ITEM DESCRIPTION",
-		"VENDOR", "QTY", "DEBIT", "CREDIT", "AMOUNT",
-	]
-	widths = [12, 12, 12, 22, 34, 20, 6, 15, 15, 16]
-
-	wb = Workbook()
-	wb.remove(wb.active)
-	for key, sheet in (("PROYEK", "REKAP PROYEK"), ("BON_MATERIAL", "REKAP BON MATERIAL"), ("UPAH", "REKAP UPAH")):
-		ws = wb.create_sheet(sheet)
-		ws["A1"] = sheet
-		ws["A1"].font = Font(bold=True, size=14)
-		ws["A2"] = brand
-		ws["A3"] = "PROYEK: %s" % (proj.get("name") or "")
-		ws["A4"] = "KODE: %s" % data["code"]
-		ws.append([])
-		ws.append(headers)
-		for c in ws[6]:
-			c.font = Font(bold=True)
-		sec = data["sections"][key]
-		for ln in sec["lines"]:
-			ws.append([
-				(ln["date"] or "")[:10],
-				ln["invoiceNo"], ln["purchaseNo"], ln["item"], ln["itemDescription"], ln["vendor"],
-				ln["qty"], float(ln["debit"]), float(ln["credit"]), float(ln["amount"]),
-			])
-		ws.append([])
-		total_row = ["", "", "", "", "", "TOTAL", "", float(sec["totalDebit"]), float(sec["totalCredit"]), float(sec["balance"])]
-		ws.append(total_row)
-		for c in ws[ws.max_row]:
-			c.font = Font(bold=True)
-		for i, w in enumerate(widths):
-			ws.column_dimensions[chr(ord("A") + i)].width = w
+	project = frappe.db.get_value(DOCTYPE, name, "project")
+	pr = (
+		frappe.db.get_value(
+			"Project", project, ["project_name", "customer", "client_address", "status"], as_dict=True
+		)
+		if project
+		else None
+	) or frappe._dict()
+	meta = {
+		"brand": {
+			"RATUNDA_RENOVASI": "RATUNDA RENOVASI",
+			"POIESIS_STUDIO": "POIESIS STUDIO",
+		}.get(data.get("businessLine"), "RATUNDA / POIESIS"),
+		"projectName": pr.project_name,
+		"clientName": frappe.db.get_value("Customer", pr.customer, "customer_name") if pr.customer else None,
+		"location": pr.client_address,
+		"projectStatus": PROJECT_STATUS_ID.get(pr.status, "AKTIF" if pr else ""),
+	}
+	logo = frappe.get_app_path("orion", "public", "images", "ratunda-logo.png")
+	wb = build_workbook(data, meta, logo if os.path.exists(logo) else None)
 
 	buf = BytesIO()
 	wb.save(buf)

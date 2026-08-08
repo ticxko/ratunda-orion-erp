@@ -143,6 +143,9 @@ _RULES: list[MappingRule] = [
 	MappingRule(None, "6-1800", "Beban Administrasi/Transfer Bank (Rp 2.500)", "high", outflow_only=True, amount=2500),
 	MappingRule(re.compile(r"biaya adm", re.I), "6-1800", "Beban Administrasi Bank", "high"),
 	MappingRule(re.compile(r"biaya transfer|biaya txn|bif biaya", re.I), "6-1800", "Beban Transfer Bank", "high"),
+	# Minimum-balance fee (e.g. Mandiri "Biaya saldo minimum", Rp 25.000). Always
+	# a money-out charge, so outflow-guarded.
+	MappingRule(re.compile(r"saldo\s*minimum", re.I), "6-1800", "Beban Administrasi Bank (saldo minimum)", "high", outflow_only=True),
 	# Tax rules must come BEFORE the generic Bunga/Interest rule, otherwise
 	# "Pajak Bunga" / "Tax on Interest" misfire to 7-1100 Pendapatan Bunga.
 	MappingRule(
@@ -348,6 +351,15 @@ _KOPRA_RULES: list[MappingRule] = [
 	# CAU — Upah Tukang (bare CAU → Ratunda).
 	MappingRule(re.compile(r"\bP-?CAU(?:\d|\b)", re.I), "5-2900", "Upah Tukang / Pekerja - Poiesis", "high"),
 	MappingRule(re.compile(r"\bR?-?CAU(?:\d|\b)", re.I), "5-1200", "Upah Tukang / Pekerja - Ratunda", "high"),
+
+	# CAR — reimbursement of project expenses paid out-of-pocket by staff/tukang
+	# (Cash Advance Reimbursement). Refs seen as `<R|P>-CAR<n>-KN<nn>-26<roman>`
+	# (e.g. "R-CAR01-KN11-26VII"). Unlike CAU/CAM/CAO these REQUIRE a trailing
+	# digit (\bR?-?CAR\d, not (?:\d|\b)): "CAR" is a common word/name fragment,
+	# so — like the short/ambiguous PO/BV/bare-SPK codes — we key on the running
+	# number to avoid matching prose. All real CAR refs carry one.
+	MappingRule(re.compile(r"\bP-?CAR\d", re.I), "5-3200", "Biaya Reimbursement Project - Poiesis", "high"),
+	MappingRule(re.compile(r"\bR?-?CAR\d", re.I), "5-1950", "Biaya Reimbursement Project - Ratunda", "high"),
 
 	# ─── Utilities / internet providers ──────────────────────────────────
 	# Must come BEFORE the BV rule so a BV-prefixed reference that ALSO

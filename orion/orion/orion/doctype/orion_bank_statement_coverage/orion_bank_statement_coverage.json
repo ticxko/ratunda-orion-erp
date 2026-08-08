@@ -1,0 +1,157 @@
+{
+ "actions": [],
+ "autoname": "format:BSC-{account_no}-{period_year}-{period_month}",
+ "creation": "2026-08-07 09:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "account_no",
+  "period_year",
+  "period_month",
+  "column_break_head",
+  "status",
+  "period_label",
+  "computed_at",
+  "section_break_detail",
+  "recorded_count",
+  "recorded_days",
+  "expected_count",
+  "column_break_detail",
+  "full_month_job",
+  "has_inbox"
+ ],
+ "fields": [
+  {
+   "fieldname": "account_no",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Bank Account No",
+   "reqd": 1
+  },
+  {
+   "fieldname": "period_year",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Year",
+   "reqd": 1
+  },
+  {
+   "fieldname": "period_month",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Month",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "not_started",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "not_started\npartial\ncompleted",
+   "reqd": 1
+  },
+  {
+   "description": "Statement period as parsed from the imported PDF (informational).",
+   "fieldname": "period_label",
+   "fieldtype": "Data",
+   "label": "Period Label"
+  },
+  {
+   "fieldname": "computed_at",
+   "fieldtype": "Datetime",
+   "label": "Computed At"
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Coverage Detail"
+  },
+  {
+   "default": "0",
+   "description": "BANK_IMPORT journal entries recorded for this account in this month.",
+   "fieldname": "recorded_count",
+   "fieldtype": "Int",
+   "label": "Recorded Count"
+  },
+  {
+   "default": "0",
+   "description": "Distinct posting days recorded in this month.",
+   "fieldname": "recorded_days",
+   "fieldtype": "Int",
+   "label": "Recorded Days"
+  },
+  {
+   "default": "0",
+   "description": "Non-duplicate transactions in the full-month statement expected to be recorded.",
+   "fieldname": "expected_count",
+   "fieldtype": "Int",
+   "label": "Expected Count"
+  },
+  {
+   "fieldname": "column_break_detail",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The Orion Bank Statement Job recognised as this month's full-month statement, if any.",
+   "fieldname": "full_month_job",
+   "fieldtype": "Data",
+   "label": "Full Month Job"
+  },
+  {
+   "default": "0",
+   "description": "This account has the daily inbox (Kopra) feed, so a partial (in-progress) status is expected.",
+   "fieldname": "has_inbox",
+   "fieldtype": "Check",
+   "label": "Has Inbox"
+  }
+ ],
+ "links": [],
+ "modified": "2026-08-07 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Bank Statement Coverage",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
