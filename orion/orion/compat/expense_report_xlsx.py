@@ -52,6 +52,9 @@ MONTHS_ID = [
 THIN = Side(style="thin")
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
+# "Rp 10.000" — the thousands separator renders per Excel locale (dot on id-ID)
+RP_FMT = '"Rp "#,##0'
+
 
 def _date_id(iso: str | None) -> str:
 	"""'2026-08-05T…' -> '5 Agustus 2026' (empty on missing/garbled input)."""
@@ -169,6 +172,8 @@ def _build_sheet(ws, data: dict, key: str, title: str, meta: dict, logo_path: st
 			c.value = value
 			c.font = body_font
 			c.border = BOX
+			if col in "IJK":
+				c.number_format = RP_FMT
 
 	row += 1
 	total_font = Font(name="Verdana", size=10, bold=True, color=BLACK)
@@ -178,6 +183,8 @@ def _build_sheet(ws, data: dict, key: str, title: str, meta: dict, logo_path: st
 		c.value = value
 		c.font = total_font
 		c.border = BOX
+		if col in "IJK":
+			c.number_format = RP_FMT
 	ws["G%d" % row].fill = white
 
 	# signature boxes
