@@ -184,7 +184,10 @@ def _orient(rows, debit_col, credit_col, amount_col):
 	return votes >= 0, votes != 0
 
 
-def _parse_sheet(ws):
+TEMPLATE_MARKER = "orion-lpp-template-v1"
+
+
+def _parse_sheet(ws, trusted: bool = False):
 	header_row, fields = _find_header(ws)
 	if not header_row:
 		return None
@@ -223,11 +226,17 @@ def _parse_sheet(ws):
 		or (debit_col and r["money"].get(debit_col) is not None)
 		or (credit_col and r["money"].get(credit_col) is not None)
 	]
-	direct, decided = _orient(rows, debit_col, credit_col, amount_col)
-	if not decided:
-		# no usable AMOUNT column: legacy labels the growing column CREDIT on
-		# REKAP PROYEK and DEBIT on BON MATERIAL/UPAH
-		direct = _sheet_section(ws.title) != "PROYEK"
+	if trusted:
+		# Orion template workbook: labels are Orion-native, never swap. Also
+		# sidesteps the formula-cache edge (template AMOUNT cells are formulas
+		# with no cached value until the file is saved by a spreadsheet app).
+		direct = True
+	else:
+		direct, decided = _orient(rows, debit_col, credit_col, amount_col)
+		if not decided:
+			# no usable AMOUNT column: legacy labels the growing column CREDIT
+			# on REKAP PROYEK and DEBIT on BON MATERIAL/UPAH
+			direct = _sheet_section(ws.title) != "PROYEK"
 	if not direct:
 		debit_col, credit_col = credit_col, debit_col
 
@@ -252,13 +261,14 @@ def _parse_sheet(ws):
 
 def parse_workbook(content: bytes) -> dict:
 	wb = load_workbook(BytesIO(content), data_only=True, read_only=False)
+	trusted = TEMPLATE_MARKER in (wb.properties.keywords or "")
 	sections = {s: [] for s in SECTIONS}
 	sheets, warnings = [], []
 	taken = {}
 	for ws in wb.worksheets:
 		if ws.sheet_state != "visible":
 			continue
-		parsed = _parse_sheet(ws)
+		parsed = _parse_sheet(ws, trusted=trusted)
 		if not parsed:
 			continue
 		section = _sheet_section(ws.title)

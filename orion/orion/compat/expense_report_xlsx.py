@@ -19,10 +19,15 @@ plus display metadata resolved by the caller:
   }
 """
 
+from datetime import datetime
+
 from openpyxl import Workbook
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
-from openpyxl.styles import Border, Color, Font, PatternFill, Side
+from openpyxl.styles import Border, Color, Font, PatternFill, Protection, Side
+from openpyxl.workbook.protection import WorkbookProtection
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.protection import SheetProtection
 
 PURPLE = "FF7030A0"
 WHITE = Color(theme=0)
@@ -54,6 +59,20 @@ BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 # "Rp 10.000" — the thousands separator renders per Excel locale (dot on id-ID)
 RP_FMT = '"Rp "#,##0'
+
+# Template mode: sheet-protected fill-in form. The password is tamper
+# discouragement for the field team, not security.
+TEMPLATE_ROWS = 150
+TEMPLATE_PASSWORD = "RATUNDA2026"
+TEMPLATE_MARKER = "orion-lpp-template-v1"
+UNLOCKED = Protection(locked=False)
+
+
+def _iso_to_date(iso: str | None):
+	try:
+		return datetime.strptime((iso or "")[:10], "%Y-%m-%d").date()
+	except ValueError:
+		return None
 
 
 def _date_id(iso: str | None) -> str:
@@ -109,7 +128,7 @@ def _add_logo(ws, logo_path: str):
 	ws.add_image(img)
 
 
-def _build_sheet(ws, data: dict, key: str, title: str, meta: dict, logo_path: str | None):
+def _build_sheet(ws, data: dict, key: str, title: str, meta: dict, logo_path: str | None, template: bool = False):
 	white = PatternFill("solid", fgColor=WHITE)
 	purple = PatternFill("solid", fgColor=PURPLE)
 	lavender = PatternFill("solid", fgColor=LAVENDER)
@@ -160,24 +179,56 @@ def _build_sheet(ws, data: dict, key: str, title: str, meta: dict, logo_path: st
 
 	sec = data["sections"][key]
 	row = 10
-	for ln in sec["lines"]:
+	lines = sec["lines"]
+	count = max(len(lines), TEMPLATE_ROWS) if template else len(lines)
+	for i in range(count):
 		row += 1
-		values = [
-			(ln["date"] or "")[:10],
-			ln["invoiceNo"], ln["purchaseNo"], ln["item"], ln["itemDescription"], ln["vendor"],
-			ln["qty"], float(ln["debit"]), float(ln["credit"]), float(ln["amount"]),
-		]
+		ln = lines[i] if i < len(lines) else None
+		if ln is None:
+			values = [None] * 10
+		elif template:
+			# real date + only B..J values; K becomes a running-saldo formula
+			values = [
+				_iso_to_date(ln["date"]),
+				ln["invoiceNo"], ln["purchaseNo"], ln["item"], ln["itemDescription"], ln["vendor"],
+				ln["qty"], float(ln["debit"]), float(ln["credit"]),
+			]
+		else:
+			values = [
+				(ln["date"] or "")[:10],
+				ln["invoiceNo"], ln["purchaseNo"], ln["item"], ln["itemDescription"], ln["vendor"],
+				ln["qty"], float(ln["debit"]), float(ln["credit"]), float(ln["amount"]),
+			]
 		for col, value in zip(COLS, values):
+			ws["%s%d" % (col, row)].value = value
+		for col in COLS:
 			c = ws["%s%d" % (col, row)]
-			c.value = value
 			c.font = body_font
 			c.border = BOX
 			if col in "IJK":
 				c.number_format = RP_FMT
+			if template:
+				if col == "B":
+					c.number_format = "dd/mm/yyyy"
+				elif col in "CDEFG":
+					c.number_format = "@"  # force text: keeps refs like 01-02 out of date coercion
+				if col != "K":
+					c.protection = UNLOCKED
+		if template:
+			# live running saldo; N() zeroes the header-row anchor
+			ws["K%d" % row] = '=IF(AND(I{r}="",J{r}=""),"",N(K{p})+N(I{r})-N(J{r}))'.format(r=row, p=row - 1)
 
 	row += 1
 	total_font = Font(name="Verdana", size=10, bold=True, color=BLACK)
-	totals = {"G": "TOTAL", "H": None, "I": float(sec["totalDebit"]), "J": float(sec["totalCredit"]), "K": float(sec["balance"])}
+	if template:
+		totals = {
+			"G": "TOTAL", "H": None,
+			"I": "=SUM(I11:I%d)" % (row - 1),
+			"J": "=SUM(J11:J%d)" % (row - 1),
+			"K": "=I%d-J%d" % (row, row),
+		}
+	else:
+		totals = {"G": "TOTAL", "H": None, "I": float(sec["totalDebit"]), "J": float(sec["totalCredit"]), "K": float(sec["balance"])}
 	for col, value in totals.items():
 		c = ws["%s%d" % (col, row)]
 		c.value = value
@@ -194,10 +245,38 @@ def _build_sheet(ws, data: dict, key: str, title: str, meta: dict, logo_path: st
 	_sig_row(ws, row + 5, "AUTHORIZED BY", data.get("authorizedBy") or "")
 	_sig_row(ws, row + 6, "AUTHORIZED ON", _date_id(data.get("updatedAt")) if authorized else "")
 
+	if template:
+		last = 10 + count
+		dv_date = DataValidation(
+			type="date", operator="between", formula1="DATE(2000,1,1)", formula2="DATE(2100,12,31)",
+			allow_blank=True, showErrorMessage=True,
+			errorTitle="Tanggal", error="Isi tanggal yang valid (dd/mm/yyyy)",
+		)
+		dv_num = DataValidation(
+			type="decimal", operator="greaterThanOrEqual", formula1="0",
+			allow_blank=True, showErrorMessage=True,
+			errorTitle="Angka", error="Isi angka saja, tanpa Rp dan tanpa titik ribuan",
+		)
+		ws.add_data_validation(dv_date)
+		ws.add_data_validation(dv_num)
+		dv_date.add("B11:B%d" % last)
+		dv_num.add("H11:J%d" % last)  # QTY + DEBIT + CREDIT
+		# lock everything except the unlocked data cells; row insertion stays allowed
+		ws.protection = SheetProtection(
+			sheet=True, insertRows=False, selectLockedCells=False, selectUnlockedCells=False,
+			formatCells=True, formatColumns=True, formatRows=True,
+			deleteRows=True, deleteColumns=True, insertColumns=True, sort=True, autoFilter=True,
+		)
+		ws.protection.set_password(TEMPLATE_PASSWORD)
 
-def build_workbook(data: dict, meta: dict, logo_path: str | None) -> Workbook:
+
+def build_workbook(data: dict, meta: dict, logo_path: str | None, template: bool = False) -> Workbook:
 	wb = Workbook()
 	wb.remove(wb.active)
 	for key, sheet, title in SHEETS:
-		_build_sheet(wb.create_sheet(sheet), data, key, title, meta, logo_path)
+		_build_sheet(wb.create_sheet(sheet), data, key, title, meta, logo_path, template)
+	if template:
+		wb.security = WorkbookProtection(lockStructure=True)
+		wb.security.workbook_password = TEMPLATE_PASSWORD
+		wb.properties.keywords = TEMPLATE_MARKER
 	return wb
