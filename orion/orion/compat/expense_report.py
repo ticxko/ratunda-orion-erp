@@ -319,3 +319,29 @@ def export_xlsx(reportId: str):
 	frappe.response["filename"] = "%s.xlsx" % data["code"]
 	frappe.response["filecontent"] = buf.getvalue()
 	frappe.response["type"] = "binary"
+
+
+@frappe.whitelist(methods=["POST"])
+def import_xlsx():
+	"""Parse an uploaded LaporanKeuanganProyek workbook (multipart field
+	`file` — the JSON gateway can't carry files) into expense-report line
+	rows. Parse-only: nothing is written; the SPA previews the result and
+	saves it through the normal expense-report PATCH."""
+	if frappe.session.user in ("Guest", "", None):
+		raise frappe.AuthenticationError
+	f = frappe.request.files.get("file")
+	if f is None or not f.filename:
+		frappe.throw("File Excel tidak ditemukan di permintaan")
+	if not f.filename.lower().endswith((".xlsx", ".xlsm")):
+		frappe.throw("Format harus .xlsx — simpan ulang file .xls sebagai .xlsx lalu upload lagi")
+
+	from orion.compat.expense_report_import import parse_workbook
+
+	try:
+		result = parse_workbook(f.stream.read())
+	except Exception as e:
+		frappe.log_error(title="expense report import: unreadable workbook")
+		frappe.throw("File Excel tidak bisa dibaca (%s)" % e)
+	if not result["sheets"]:
+		frappe.throw("Tidak menemukan tabel laporan di file — pastikan ada sheet dengan header DATE/DEBIT/CREDIT")
+	return result
