@@ -276,6 +276,42 @@ PROJECT_STATUS_ID = {
 }
 
 
+def _xlsx_meta(project: str | None, business_line: str | None) -> dict:
+	"""Display metadata for the workbook info block, from the linked Project."""
+	pr = (
+		frappe.db.get_value(
+			"Project", project, ["project_name", "customer", "client_address", "status"], as_dict=True
+		)
+		if project
+		else None
+	) or frappe._dict()
+	return {
+		"brand": {
+			"RATUNDA_RENOVASI": "RATUNDA RENOVASI",
+			"POIESIS_STUDIO": "POIESIS STUDIO",
+		}.get(business_line, "RATUNDA / POIESIS"),
+		"projectName": pr.project_name,
+		"clientName": frappe.db.get_value("Customer", pr.customer, "customer_name") if pr.customer else None,
+		"location": pr.client_address,
+		"projectStatus": PROJECT_STATUS_ID.get(pr.status, "AKTIF" if pr else ""),
+	}
+
+
+def _xlsx_respond(data: dict, meta: dict, filename: str, template: bool = False):
+	import os
+	from io import BytesIO
+
+	from orion.compat.expense_report_xlsx import build_workbook
+
+	logo = frappe.get_app_path("orion", "public", "images", "ratunda-logo.png")
+	wb = build_workbook(data, meta, logo if os.path.exists(logo) else None, template=template)
+	buf = BytesIO()
+	wb.save(buf)
+	frappe.response["filename"] = filename
+	frappe.response["filecontent"] = buf.getvalue()
+	frappe.response["type"] = "binary"
+
+
 @frappe.whitelist(methods=["GET"])
 def export_xlsx(reportId: str):
 	"""Direct binary download (the JSON gateway can't stream files). Builds the
@@ -287,38 +323,43 @@ def export_xlsx(reportId: str):
 	if not name:
 		frappe.throw("Not found", exc=frappe.DoesNotExistError)
 	data = _report_read(name)
-
-	import os
-	from io import BytesIO
-
-	from orion.compat.expense_report_xlsx import build_workbook
-
 	project = frappe.db.get_value(DOCTYPE, name, "project")
-	pr = (
-		frappe.db.get_value(
-			"Project", project, ["project_name", "customer", "client_address", "status"], as_dict=True
-		)
-		if project
-		else None
-	) or frappe._dict()
-	meta = {
-		"brand": {
-			"RATUNDA_RENOVASI": "RATUNDA RENOVASI",
-			"POIESIS_STUDIO": "POIESIS STUDIO",
-		}.get(data.get("businessLine"), "RATUNDA / POIESIS"),
-		"projectName": pr.project_name,
-		"clientName": frappe.db.get_value("Customer", pr.customer, "customer_name") if pr.customer else None,
-		"location": pr.client_address,
-		"projectStatus": PROJECT_STATUS_ID.get(pr.status, "AKTIF" if pr else ""),
-	}
-	logo = frappe.get_app_path("orion", "public", "images", "ratunda-logo.png")
-	wb = build_workbook(data, meta, logo if os.path.exists(logo) else None)
+	_xlsx_respond(data, _xlsx_meta(project, data.get("businessLine")), "%s.xlsx" % data["code"])
 
-	buf = BytesIO()
-	wb.save(buf)
-	frappe.response["filename"] = "%s.xlsx" % data["code"]
-	frappe.response["filecontent"] = buf.getvalue()
-	frappe.response["type"] = "binary"
+
+@frappe.whitelist(methods=["GET"])
+def template_xlsx(projectId: str):
+	"""Locked fill-in template download, keyed on the PROJECT (works before a
+	report exists). Same styled workbook as export_xlsx but sheet-protected:
+	only the typed data cells are editable, saldo/total are live formulas, and
+	the workbook carries the template marker so import_xlsx trusts its layout.
+	Existing report rows (if any) are prefilled so the ledger can continue in
+	Excel."""
+	if frappe.session.user in ("Guest", "", None):
+		raise frappe.AuthenticationError
+	project = _resolve_name("Project", projectId)
+	if not project:
+		frappe.throw("Project not found", exc=frappe.DoesNotExistError)
+
+	existing = frappe.db.get_value(DOCTYPE, {"project": project})
+	if existing:
+		data = _report_read(existing)
+	else:
+		bl = frappe.db.get_value("Project", project, "orion_business_line") or "RATUNDA_RENOVASI"
+		data = {
+			"code": _report_code(project),
+			"businessLine": bl,
+			"status": "DRAFT",
+			"preparedBy": None,
+			"authorizedBy": None,
+			"createdAt": None,
+			"updatedAt": None,
+			"sections": {
+				s: {"lines": [], "totalDebit": "0.00", "totalCredit": "0.00", "balance": "0.00"}
+				for s in SECTIONS
+			},
+		}
+	_xlsx_respond(data, _xlsx_meta(project, data.get("businessLine")), "TEMPLATE-%s.xlsx" % data["code"], template=True)
 
 
 @frappe.whitelist(methods=["POST"])
