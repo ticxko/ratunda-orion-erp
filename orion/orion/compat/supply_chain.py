@@ -9,7 +9,10 @@ against ERPNext data:
                                         POST link, DELETE /:id unlink)
   /api/supply-chain/vendors          <- vendors.ts         (GET list)
   /api/supply-chain/purchase-orders  <- purchase-orders.ts (GET list, GET /:id)
-  /api/supply-chain/receipts         <- receipts.ts        (GET list, GET /:id)
+  /api/supply-chain/receipts         <- receipts.ts        (GET list, POST,
+                                        GET /:id, PATCH /:id, DELETE /:id,
+                                        PATCH /:id/verify, DELETE /:id/files/:fid;
+                                        scan upload -> receipt_file_upload method)
   /api/supply-chain/office-receipts  <- office-receipts.ts (GET list: EMPTY)
   /api/supply-chain/spk              <- spk.ts             (GET list: EMPTY)
   /api/supply-chain/price-library    <- price-library.ts   (GET, live aggregate)
@@ -25,8 +28,10 @@ Deliberate gaps, all called out inline:
   - Orion SPK and Orion Office Receipt doctypes are not built yet (wave 3);
     both lists return source-shaped empty payloads (the live spk table is
     empty anyway) and details/writes throw.
-  - Purchase-order/vendor/receipt writes throw (read tranche); Projects POST /
-    PATCH and Programs POST/DELETE are implemented per the Node semantics.
+  - Purchase-order/vendor writes throw (read tranche); Projects POST / PATCH,
+    Programs POST/DELETE, and field-receipt (nota lapangan) writes — create,
+    edit, verify, delete, and scan upload — are implemented per the Node
+    semantics. Office-receipt (NTK) writes still throw (doctype pending).
   - projects PATCH with programId, and any kontrakDraftFile/draft-file upload
     path, throw not-implemented (linking goes through /programs).
 """
@@ -856,11 +861,170 @@ FR_FIELDS = [
 def receipts(path: str, verb: str, payload: dict):
 	bare, query = split_path(path)
 	rest = bare[len(SC + "/receipts"):].strip("/")
-	if verb == "GET" and not rest:
+	parts = rest.split("/") if rest else []
+	if verb == "GET" and not parts:
 		return _receipts_list(query)
-	if verb == "GET" and "/" not in rest:
-		return _receipt_detail(rest)
-	frappe.throw("%s %s is not yet implemented in compat — read tranche" % (verb, bare))
+	if verb == "POST" and not parts:
+		return _receipt_create(payload)
+	if verb == "GET" and len(parts) == 1:
+		return _receipt_detail(parts[0])
+	if verb == "PATCH" and len(parts) == 1:
+		return _receipt_update(parts[0], payload)
+	if verb == "DELETE" and len(parts) == 1:
+		return _receipt_delete(parts[0])
+	if verb == "PATCH" and len(parts) == 2 and parts[1] == "verify":
+		return _receipt_verify(parts[0])
+	if verb == "DELETE" and len(parts) == 3 and parts[1] == "files":
+		return _receipt_delete_file(parts[0], parts[2])
+	# POST /:id/files rides the multipart method receipt_file_upload (below),
+	# not this JSON gateway — the gateway cannot carry file bytes.
+	frappe.throw("%s %s is not yet implemented in compat" % (verb, bare))
+
+
+def _resolve_receipt(ident: str) -> str:
+	"""Field-receipt id (orion_legacy_id for migrated rows, or the code/name for
+	compat-created ones) -> Frappe name."""
+	name = frappe.db.get_value("Orion Field Receipt", {"orion_legacy_id": ident})
+	if not name and frappe.db.exists("Orion Field Receipt", ident):
+		name = ident
+	if not name:
+		frappe.throw("Not found", exc=frappe.DoesNotExistError)
+	return name
+
+
+def _receipt_item_row(it: dict, idx: int, default_category: str = "MATERIAL") -> dict:
+	return {
+		"description": it.get("description"),
+		"category": it.get("category") or default_category,
+		"unit": it.get("unit"),
+		"quantity": float(it.get("quantity") or 0),
+		"unit_price": float(it.get("unitPrice") or 0),
+		"amount": float(it.get("amount") or 0),
+		"notes": it.get("notes"),
+		"sort_order": it.get("sortOrder") if it.get("sortOrder") is not None else idx,
+	}
+
+
+def _receipt_create(payload: dict) -> dict:
+	"""receipts.ts POST — auto-generates the NTA code
+	{BL}-NTA{n}-KN{knSeq}-{kontrakYYMM}-{lctr}-{svc}; the per-project running
+	number n = existing-count + 1 (bumped on the rare code collision, since the
+	doctype autonames on `code`). Item category defaults to MATERIAL."""
+	project_id = payload.get("projectId")
+	receipt_date = payload.get("receiptDate")
+	items = payload.get("items")
+	if not project_id or not receipt_date or not isinstance(items, list) or not items:
+		frappe.throw("projectId, receiptDate, and at least one item are required")
+
+	for i, it in enumerate(items):
+		if not it.get("description"):
+			frappe.throw("Item %d: deskripsi wajib diisi" % (i + 1))
+		if not it.get("unit"):
+			frappe.throw("Item %d: satuan wajib diisi" % (i + 1))
+		if not it.get("quantity") or float(it["quantity"]) <= 0:
+			frappe.throw("Item %d: qty wajib > 0" % (i + 1))
+		if not it.get("unitPrice") or float(it["unitPrice"]) <= 0:
+			frappe.throw("Item %d: harga satuan wajib > 0" % (i + 1))
+
+	proj_name = frappe.db.get_value("Project", {"orion_legacy_id": project_id})
+	if not proj_name and frappe.db.exists("Project", project_id):
+		proj_name = project_id
+	if not proj_name:
+		frappe.throw("Project not found", exc=frappe.DoesNotExistError)
+	proj = frappe.db.get_value(
+		"Project", proj_name,
+		["orion_business_line", "kn_sequence", "kontrak_yymm", "lctr", "orion_service_type"],
+		as_dict=True,
+	)
+
+	ca_name = None
+	if payload.get("disbursementId"):
+		dis_id = payload["disbursementId"]
+		ca_name = frappe.db.get_value("Orion Cash Advance", {"orion_legacy_id": dis_id})
+		if not ca_name and frappe.db.exists("Orion Cash Advance", dis_id):
+			ca_name = dis_id
+
+	bl = "R" if proj.orion_business_line == "RATUNDA_RENOVASI" else "P"
+	kn = "KN%02d" % int(proj.kn_sequence or 0)
+	yymm = proj.kontrak_yymm or "0000"
+	lctr = proj.lctr or "XXXX"
+	svc = proj.orion_service_type or "UNKWN"
+	seq = frappe.db.count("Orion Field Receipt", {"project": proj_name}) + 1
+	code = "%s-NTA%d-%s-%s-%s-%s" % (bl, seq, kn, yymm, lctr, svc)
+	while frappe.db.exists("Orion Field Receipt", code):
+		seq += 1
+		code = "%s-NTA%d-%s-%s-%s-%s" % (bl, seq, kn, yymm, lctr, svc)
+
+	doc = frappe.new_doc("Orion Field Receipt")
+	doc.code = code
+	doc.project = proj_name
+	doc.cash_advance = ca_name
+	doc.status = "DRAFT"
+	doc.store_name = payload.get("storeName")
+	doc.receipt_date = receipt_date
+	doc.receipt_ref = payload.get("receiptRef")
+	doc.notes = payload.get("notes")
+	doc.total_amount = sum(float(it.get("amount") or 0) for it in items)
+	for idx, it in enumerate(items):
+		doc.append("items", _receipt_item_row(it, idx))
+	doc.flags.ignore_permissions = True
+	doc.insert()
+
+	return {"receipt": _receipt_detail(doc.name)["receipt"]}
+
+
+def _receipt_update(ident: str, payload: dict) -> dict:
+	"""receipts.ts PATCH /:id — DRAFT only; replaces the whole item table and
+	recomputes total when `items` is supplied (mirrors the Node deleteMany/create)."""
+	name = _resolve_receipt(ident)
+	doc = frappe.get_doc("Orion Field Receipt", name)
+	if doc.status != "DRAFT":
+		frappe.throw("Only DRAFT receipts can be edited")
+
+	doc.store_name = payload.get("storeName")
+	if payload.get("receiptDate"):
+		doc.receipt_date = payload["receiptDate"]
+	doc.receipt_ref = payload.get("receiptRef")
+	doc.notes = payload.get("notes")
+	if isinstance(payload.get("items"), list):
+		doc.set("items", [])
+		for idx, it in enumerate(payload["items"]):
+			doc.append("items", _receipt_item_row(it, idx))
+		doc.total_amount = sum(float(it.get("amount") or 0) for it in payload["items"])
+	doc.flags.ignore_permissions = True
+	doc.save()
+
+	return {"receipt": _receipt_detail(name)["receipt"]}
+
+
+def _receipt_delete(ident: str) -> dict:
+	name = _resolve_receipt(ident)
+	if frappe.db.get_value("Orion Field Receipt", name, "status") != "DRAFT":
+		frappe.throw("Only DRAFT receipts can be deleted")
+	frappe.delete_doc("Orion Field Receipt", name, ignore_permissions=True)
+	return {"success": True}
+
+
+def _receipt_verify(ident: str) -> dict:
+	name = _resolve_receipt(ident)
+	doc = frappe.get_doc("Orion Field Receipt", name)
+	if doc.status != "DRAFT":
+		frappe.throw("Only DRAFT receipts can be verified")
+	doc.status = "VERIFIED"
+	doc.flags.ignore_permissions = True
+	doc.save()
+	return {"receipt": _receipt_detail(name)["receipt"]}
+
+
+def _receipt_delete_file(ident: str, file_id: str) -> dict:
+	name = _resolve_receipt(ident)
+	f = frappe.db.get_value(
+		"File", file_id, ["attached_to_doctype", "attached_to_name"], as_dict=True
+	)
+	if not f or f.attached_to_doctype != "Orion Field Receipt" or f.attached_to_name != name:
+		frappe.throw("Not found", exc=frappe.DoesNotExistError)
+	frappe.delete_doc("File", file_id, ignore_permissions=True)
+	return {"success": True}
 
 
 def _receipts_list(query: dict) -> dict:
@@ -1022,24 +1186,277 @@ def _ca_stubs(names: set) -> dict:
 	}
 
 
-# ── office receipts / SPK — doctypes not built yet (wave 3) ─────────────────
+# ── office receipts (nota kantor / NTK) ─────────────────────────────────────
+
+OFR_FIELDS = [
+	"name", "status", "store_name", "receipt_date", "receipt_ref", "notes",
+	"total_amount", "orion_legacy_id", "creation", "modified",
+]
 
 
 @route(SC + "/office-receipts")
 def office_receipts(path: str, verb: str, payload: dict):
-	"""The Orion Office Receipt doctype was NOT built in wave 2; until it
-	lands, the list is served source-shaped but empty so the feynman screen
-	renders (office-receipts.ts GET '' -> {receipts: []})."""
-	bare, _query = split_path(path)
+	bare, query = split_path(path)
 	rest = bare[len(SC + "/office-receipts"):].strip("/")
-	if verb == "GET" and not rest:
-		return {"receipts": []}
-	if verb == "GET" and "/" not in rest:
+	parts = rest.split("/") if rest else []
+	if verb == "GET" and not parts:
+		return _office_receipts_list(query)
+	if verb == "POST" and not parts:
+		return _office_receipt_create(payload)
+	if verb == "GET" and len(parts) == 1:
+		return _office_receipt_detail(parts[0])
+	if verb == "PATCH" and len(parts) == 1:
+		return _office_receipt_update(parts[0], payload)
+	if verb == "DELETE" and len(parts) == 1:
+		return _office_receipt_delete(parts[0])
+	if verb == "PATCH" and len(parts) == 2 and parts[1] == "verify":
+		return _office_receipt_verify(parts[0])
+	if verb == "DELETE" and len(parts) == 3 and parts[1] == "files":
+		return _office_receipt_delete_file(parts[0], parts[2])
+	# POST /:id/files rides the multipart method office_receipt_file_upload (below).
+	frappe.throw("%s %s is not yet implemented in compat" % (verb, bare))
+
+
+def _resolve_office_receipt(ident: str) -> str:
+	name = frappe.db.get_value("Orion Office Receipt", {"orion_legacy_id": ident})
+	if not name and frappe.db.exists("Orion Office Receipt", ident):
+		name = ident
+	if not name:
 		frappe.throw("Not found", exc=frappe.DoesNotExistError)
-	frappe.throw(
-		"%s %s is not yet implemented in compat — Orion Office Receipt doctype pending"
-		% (verb, bare)
+	return name
+
+
+def _office_receipt_read(r) -> dict:
+	return {
+		"id": r.orion_legacy_id or r.name,
+		"code": r.name,
+		"storeName": r.store_name,
+		"receiptDate": _iso_date(r.receipt_date),
+		"receiptRef": r.receipt_ref,
+		"notes": r.notes,
+		"status": r.status or "DRAFT",
+		"totalAmount": _dec2(r.total_amount) or "0.00",
+		"createdAt": _iso(r.creation),
+		"updatedAt": _iso(r.modified),
+	}
+
+
+def _office_receipts_list(query: dict) -> dict:
+	"""office-receipts.ts GET ?status= — createdAt desc, items reduced to [{amount}]."""
+	filters = {}
+	if query.get("status") and query["status"] != "ALL":
+		filters["status"] = query["status"]
+	rows = frappe.get_all(
+		"Orion Office Receipt", filters=filters, fields=OFR_FIELDS, order_by="creation desc"
 	)
+	amounts = {}
+	if rows:
+		for i in frappe.get_all(
+			"Orion Office Receipt Item",
+			filters={"parenttype": "Orion Office Receipt", "parent": ("in", [r.name for r in rows])},
+			fields=["parent", "amount"],
+			order_by="parent asc, idx asc",
+		):
+			amounts.setdefault(i.parent, []).append({"amount": _dec2(i.amount) or "0"})
+	return {
+		"receipts": [
+			dict(_office_receipt_read(r), items=amounts.get(r.name, [])) for r in rows
+		]
+	}
+
+
+def _office_receipt_detail(ident: str) -> dict:
+	name = _resolve_office_receipt(ident)
+	r = frappe.get_all("Orion Office Receipt", filters={"name": name}, fields=OFR_FIELDS)[0]
+	receipt_id = r.orion_legacy_id or r.name
+	items = frappe.get_all(
+		"Orion Office Receipt Item",
+		filters={"parenttype": "Orion Office Receipt", "parent": name},
+		fields=[
+			"name", "description", "category", "unit", "quantity", "unit_price",
+			"amount", "notes", "sort_order", "creation",
+		],
+		order_by="sort_order asc, idx asc",
+	)
+	out = _office_receipt_read(r)
+	out["items"] = [
+		{
+			"id": i.name,
+			"officeReceiptId": receipt_id,
+			"description": i.description,
+			"category": i.category,
+			"unit": i.unit,
+			"quantity": "%.3f" % float(i.quantity or 0),
+			"unitPrice": _dec2(i.unit_price) or "0.00",
+			"amount": _dec2(i.amount) or "0.00",
+			"notes": i.notes,
+			"sortOrder": i.sort_order or 0,
+			"createdAt": _iso(i.creation),
+		}
+		for i in items
+	]
+	out["files"] = _office_receipt_files(name, receipt_id)
+	return {"receipt": out}
+
+
+def _office_receipt_create(payload: dict) -> dict:
+	"""office-receipts.ts POST — auto-generates the NTK code NTK{n}-{YYMM}; n is a
+	global running number (existing-count + 1, bumped on collision) and YYMM is the
+	current month, matching the Node source. Item category defaults to OPERASIONAL."""
+	receipt_date = payload.get("receiptDate")
+	items = payload.get("items")
+	if not receipt_date or not isinstance(items, list) or not items:
+		frappe.throw("receiptDate and at least one item are required")
+
+	now = frappe.utils.now_datetime()
+	yymm = "%02d%02d" % (now.year % 100, now.month)
+	seq = frappe.db.count("Orion Office Receipt") + 1
+	code = "NTK%d-%s" % (seq, yymm)
+	while frappe.db.exists("Orion Office Receipt", code):
+		seq += 1
+		code = "NTK%d-%s" % (seq, yymm)
+
+	doc = frappe.new_doc("Orion Office Receipt")
+	doc.code = code
+	doc.status = "DRAFT"
+	doc.store_name = payload.get("storeName")
+	doc.receipt_date = receipt_date
+	doc.receipt_ref = payload.get("receiptRef")
+	doc.notes = payload.get("notes")
+	doc.total_amount = sum(float(it.get("amount") or 0) for it in items)
+	for idx, it in enumerate(items):
+		doc.append("items", _receipt_item_row(it, idx, default_category="OPERASIONAL"))
+	doc.flags.ignore_permissions = True
+	doc.insert()
+
+	return {"receipt": _office_receipt_detail(doc.name)["receipt"]}
+
+
+def _office_receipt_update(ident: str, payload: dict) -> dict:
+	name = _resolve_office_receipt(ident)
+	doc = frappe.get_doc("Orion Office Receipt", name)
+	if doc.status != "DRAFT":
+		frappe.throw("Only DRAFT receipts can be edited")
+	doc.store_name = payload.get("storeName")
+	if payload.get("receiptDate"):
+		doc.receipt_date = payload["receiptDate"]
+	doc.receipt_ref = payload.get("receiptRef")
+	doc.notes = payload.get("notes")
+	if isinstance(payload.get("items"), list):
+		doc.set("items", [])
+		for idx, it in enumerate(payload["items"]):
+			doc.append("items", _receipt_item_row(it, idx, default_category="OPERASIONAL"))
+		doc.total_amount = sum(float(it.get("amount") or 0) for it in payload["items"])
+	doc.flags.ignore_permissions = True
+	doc.save()
+	return {"receipt": _office_receipt_detail(name)["receipt"]}
+
+
+def _office_receipt_delete(ident: str) -> dict:
+	name = _resolve_office_receipt(ident)
+	if frappe.db.get_value("Orion Office Receipt", name, "status") != "DRAFT":
+		frappe.throw("Only DRAFT receipts can be deleted")
+	frappe.delete_doc("Orion Office Receipt", name, ignore_permissions=True)
+	return {"success": True}
+
+
+def _office_receipt_verify(ident: str) -> dict:
+	name = _resolve_office_receipt(ident)
+	doc = frappe.get_doc("Orion Office Receipt", name)
+	if doc.status != "DRAFT":
+		frappe.throw("Only DRAFT receipts can be verified")
+	doc.status = "VERIFIED"
+	doc.flags.ignore_permissions = True
+	doc.save()
+	return {"receipt": _office_receipt_detail(name)["receipt"]}
+
+
+def _office_receipt_delete_file(ident: str, file_id: str) -> dict:
+	name = _resolve_office_receipt(ident)
+	f = frappe.db.get_value(
+		"File", file_id, ["attached_to_doctype", "attached_to_name"], as_dict=True
+	)
+	if not f or f.attached_to_doctype != "Orion Office Receipt" or f.attached_to_name != name:
+		frappe.throw("Not found", exc=frappe.DoesNotExistError)
+	frappe.delete_doc("File", file_id, ignore_permissions=True)
+	return {"success": True}
+
+
+def _office_receipt_files(ofr_name: str, receipt_id: str) -> list:
+	"""Scan attachments for an office receipt, shaped like the legacy
+	OfficeReceiptFile wire object (office-receipts.ts)."""
+	rows = frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": "Orion Office Receipt", "attached_to_name": ofr_name},
+		fields=["name", "file_name", "file_url", "file_size", "creation"],
+		order_by="creation asc, file_name asc",
+	)
+	return [
+		{
+			"id": f.name,
+			"officeReceiptId": receipt_id,
+			"filename": f.file_name,
+			"originalName": f.file_name,
+			"mimeType": _mime_from_name(f.file_name),
+			"fileSize": f.file_size or 0,
+			"url": f.file_url,
+			"gdriveSynced": False,
+			"uploadedAt": _iso(f.creation),
+		}
+		for f in rows
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def office_receipt_file_upload():
+	"""Multipart scan upload for an office receipt (nota kantor) — the NTK twin of
+	receipt_file_upload. The SPA posts form fields `receiptId` + `file`."""
+	if frappe.session.user in ("Guest", "", None):
+		raise frappe.AuthenticationError
+
+	receipt_id = frappe.form_dict.get("receiptId")
+	if not receipt_id:
+		frappe.throw("receiptId is required")
+	upload = frappe.request.files.get("file")
+	if upload is None or not upload.filename:
+		frappe.throw("No file provided")
+
+	name = _resolve_office_receipt(receipt_id)
+	content = upload.stream.read()
+	mime = upload.content_type or _mime_from_name(upload.filename)
+	if mime not in _NOTA_ALLOWED_MIME:
+		frappe.throw("Tipe file tidak didukung: %s. Gunakan JPG, PNG, WEBP, HEIC, atau PDF." % mime)
+	if len(content) > _NOTA_MAX_FILE_SIZE:
+		frappe.throw("Ukuran file terlalu besar (maks 20 MB)")
+
+	saved = frappe.get_doc({
+		"doctype": "File",
+		"file_name": upload.filename,
+		"attached_to_doctype": "Orion Office Receipt",
+		"attached_to_name": name,
+		"is_private": 1,
+		"content": content,
+	})
+	saved.flags.ignore_permissions = True
+	saved.insert()
+
+	receipt_id_out = frappe.db.get_value("Orion Office Receipt", name, "orion_legacy_id") or name
+	return {
+		"file": {
+			"id": saved.name,
+			"officeReceiptId": receipt_id_out,
+			"filename": saved.file_name,
+			"originalName": saved.file_name,
+			"mimeType": _mime_from_name(saved.file_name),
+			"fileSize": saved.file_size or len(content),
+			"url": saved.file_url,
+			"gdriveSynced": False,
+			"uploadedAt": _iso(saved.creation),
+		}
+	}
+
+
+# ── SPK — doctype not built yet (wave 3) ────────────────────────────────────
 
 
 @route(SC + "/spk")
@@ -1173,6 +1590,65 @@ def _receipt_files(fr_name: str, receipt_id: str) -> list:
 		}
 		for f in rows
 	]
+
+
+# nota scan uploads — mirrors bellatrix upload-config.ts (validateFile)
+_NOTA_ALLOWED_MIME = {
+	"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf",
+}
+_NOTA_MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+
+
+@frappe.whitelist(methods=["POST"])
+def receipt_file_upload():
+	"""Multipart scan upload for a field receipt (nota lapangan). The JSON gateway
+	(orion.compat.handle) cannot carry file bytes, so receipts.ts POST /:id/files
+	is served here instead — the SPA posts form fields `receiptId` + `file`.
+	Stored as a private File attachment on the Orion Field Receipt (served back
+	via file_url in _receipt_files). Returns {"file": <FieldReceiptFile wire>}."""
+	if frappe.session.user in ("Guest", "", None):
+		raise frappe.AuthenticationError
+
+	receipt_id = frappe.form_dict.get("receiptId")
+	if not receipt_id:
+		frappe.throw("receiptId is required")
+	upload = frappe.request.files.get("file")
+	if upload is None or not upload.filename:
+		frappe.throw("No file provided")
+
+	name = _resolve_receipt(receipt_id)
+	content = upload.stream.read()
+	mime = upload.content_type or _mime_from_name(upload.filename)
+	if mime not in _NOTA_ALLOWED_MIME:
+		frappe.throw("Tipe file tidak didukung: %s. Gunakan JPG, PNG, WEBP, HEIC, atau PDF." % mime)
+	if len(content) > _NOTA_MAX_FILE_SIZE:
+		frappe.throw("Ukuran file terlalu besar (maks 20 MB)")
+
+	saved = frappe.get_doc({
+		"doctype": "File",
+		"file_name": upload.filename,
+		"attached_to_doctype": "Orion Field Receipt",
+		"attached_to_name": name,
+		"is_private": 1,
+		"content": content,
+	})
+	saved.flags.ignore_permissions = True
+	saved.insert()
+
+	receipt_id_out = frappe.db.get_value("Orion Field Receipt", name, "orion_legacy_id") or name
+	return {
+		"file": {
+			"id": saved.name,
+			"fieldReceiptId": receipt_id_out,
+			"filename": saved.file_name,
+			"originalName": saved.file_name,
+			"mimeType": _mime_from_name(saved.file_name),
+			"fileSize": saved.file_size or len(content),
+			"url": saved.file_url,
+			"gdriveSynced": False,
+			"uploadedAt": _iso(saved.creation),
+		}
+	}
 
 
 def _dec2(value) -> str | None:
