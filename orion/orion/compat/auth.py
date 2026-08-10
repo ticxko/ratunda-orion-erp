@@ -14,6 +14,9 @@ from orion.compat.handle import route, split_path
 
 ROLE_MAP = [
     ("Orion Admin", "ADMIN"),
+    # Projects-only sits before Project Admin so the more restrictive tier wins
+    # when a user happens to hold both.
+    ("Orion Projects Only", "PROJECT_ONLY"),
     ("Orion Project Admin", "PROJECT_ADMIN"),
 ]
 

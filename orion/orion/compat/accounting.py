@@ -79,9 +79,11 @@ SOURCE_TYPE_BY_VOUCHER = {
 BRAND_LINES = ("RATUNDA_RENOVASI", "POIESIS_STUDIO")
 
 # bank_loans.py: default liability account (by code) per lender type.
+# OWNER_PERSONAL (the owner's own KTA) is a memo — no PT POI liability account.
 DEFAULT_ACCOUNT_BY_LENDER = {
 	"BANK": "2-1700",
 	"OWNER": "2-1500",
+	"OWNER_PERSONAL": None,
 	"THIRD_PARTY": "2-1800",
 }
 LOAN_INTEREST_CODE = "8-1100"
