@@ -11,6 +11,7 @@
   "lender_type",
   "lender_name",
   "bank_name",
+  "owner_loan",
   "column_break_identity",
   "status",
   "business_line",
@@ -46,7 +47,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Lender Type",
-   "options": "BANK\nOWNER\nTHIRD_PARTY"
+   "options": "BANK\nOWNER\nOWNER_PERSONAL\nTHIRD_PARTY"
   },
   {
    "fieldname": "lender_name",
@@ -58,6 +59,13 @@
    "fieldname": "bank_name",
    "fieldtype": "Data",
    "label": "Bank Name"
+  },
+  {
+   "description": "For OWNER_PERSONAL memo loans: which owner's Layer-A loan (2-15xx) holds this personal facility. Used to group personal debt-service per owner.",
+   "fieldname": "owner_loan",
+   "fieldtype": "Link",
+   "label": "Held By (Owner Loan)",
+   "options": "Orion Loan"
   },
   {
    "fieldname": "column_break_identity",
@@ -163,7 +171,7 @@
   }
  ],
  "links": [],
- "modified": "2026-07-30 09:00:00.000000",
+ "modified": "2026-08-09 09:30:00.000000",
  "modified_by": "Administrator",
  "module": "Orion",
  "name": "Orion Loan",

@@ -43,6 +43,7 @@ from decimal import Decimal
 import frappe
 
 from orion.accounting.loan_codes import next_doc_code, recompute_outstanding
+from orion.accounting.loan_schedule import build_schedule
 from orion.compat.accounting import (
 	_account_by_number,
 	_cc_by_line,
@@ -76,9 +77,16 @@ REV_CODE = {"POIESIS_STUDIO": "4-2100", "RATUNDA_RENOVASI": "4-1100"}
 DEFAULT_ACCOUNT_BY_LENDER = {
 	"BANK": "2-1700",
 	"OWNER": "2-1500",
+	# OWNER_PERSONAL is a memo of the owner's own KTA (DBS/BFI…): it is NOT a PT
+	# POI liability, so it posts to no GL account and never hits the balance sheet.
+	"OWNER_PERSONAL": None,
 	"THIRD_PARTY": "2-1800",
 }
 LOAN_INTEREST_CODE = "8-1100"
+# Lender types whose balance is driven by a fixed monthly installment schedule
+# (as opposed to OWNER's revolving running balance).
+INSTALLMENT_LENDER_TYPES = ("BANK", "OWNER_PERSONAL")
+DEFAULT_PERSONAL_PREFIX = "PTPOI-KTA"
 
 CATEGORY_GL = {
 	"MATERIAL": "5-1100",
@@ -95,10 +103,15 @@ _SI_FIELDS = [
 ]
 _LOAN_FIELDS = [
 	"name", "orion_legacy_id", "loan_number", "bank_name", "lender_type",
-	"lender_name", "is_revolving", "is_company_liability", "doc_prefix",
-	"account", "principal", "interest_rate", "monthly_installment",
+	"lender_name", "owner_loan", "is_revolving", "is_company_liability",
+	"doc_prefix", "account", "principal", "interest_rate", "monthly_installment",
 	"tenor_months", "start_date", "maturity_date", "business_line", "notes",
 	"creation", "modified",
+]
+_INSTALLMENT_FIELDS = [
+	"name", "orion_legacy_id", "installment_no", "due_date", "due_principal",
+	"due_interest", "due_total", "status", "paid_date", "paid_amount",
+	"loan_event", "notes", "creation",
 ]
 _EVENT_FIELDS = [
 	"name", "orion_legacy_id", "direction", "doc_code", "date",
@@ -699,13 +712,26 @@ def bank_loans(path: str, verb: str, payload: dict):
 		return {"loan": _loan_create(payload)}
 	if len(parts) == 1 and verb == "GET":
 		return {"loan": _loan_read(_loan_name(parts[0]))}
+	if len(parts) == 1 and verb == "PATCH":
+		return {"loan": _loan_update(parts[0], payload)}
+	if len(parts) == 1 and verb == "DELETE":
+		return _loan_delete(parts[0])
 	if len(parts) == 2 and parts[1] == "unlinked-lines" and verb == "GET":
 		return _loan_unlinked(parts[0])
+	if len(parts) == 2 and parts[1] == "schedule" and verb == "GET":
+		return _loan_schedule_read(parts[0])
 	if len(parts) == 2 and verb == "POST":
 		if parts[1] == "drawdown":
 			return _loan_drawdown(parts[0], payload)
 		if parts[1] == "payment":
 			return _loan_repayment(parts[0], payload)
+	if len(parts) == 3 and parts[1] == "schedule" and parts[2] == "regenerate" and verb == "POST":
+		return _loan_schedule_regenerate(parts[0])
+	if len(parts) == 4 and parts[1] == "installments" and verb == "POST":
+		if parts[3] == "pay":
+			return _installment_pay(parts[0], parts[2], payload)
+		if parts[3] == "unpay":
+			return _installment_unpay(parts[0], parts[2])
 	frappe.throw("No compat handler for %s %s" % (verb, bare), exc=frappe.DoesNotExistError)
 
 
@@ -771,12 +797,18 @@ def _loan_read(name: str, with_aggregates: bool = True) -> dict:
 		fields=_EVENT_FIELDS,
 		order_by="date desc, creation desc",
 	)
+	installments = _loan_installments(name)
+	held_by_name = None
+	if h.owner_loan:
+		held_by_name = frappe.db.get_value("Orion Loan", h.owner_loan, "lender_name")
 	out = {
 		"id": emitted,
 		"loanNumber": h.loan_number,
 		"bankName": h.bank_name,
 		"lenderType": h.lender_type,
 		"lenderName": h.lender_name,
+		"ownerLoan": (_legacy_or_name("Orion Loan", h.owner_loan) if h.owner_loan else None),
+		"heldByName": held_by_name,
 		"isRevolving": bool(h.is_revolving),
 		"isCompanyLiability": bool(h.is_company_liability),
 		"docPrefix": h.doc_prefix,
@@ -794,6 +826,8 @@ def _loan_read(name: str, with_aggregates: bool = True) -> dict:
 		"createdAt": _iso(h.creation),
 		"updatedAt": _iso(h.modified),
 		"payments": [_loan_event_read(e, emitted) for e in events],
+		"installments": [_installment_read(i) for i in installments],
+		"scheduleSummary": _schedule_summary(installments),
 		"totalPaid": None,
 		"totalInterestPaid": None,
 		"totalDrawn": None,
@@ -821,13 +855,18 @@ def _loan_list(query: dict) -> dict:
 	return {"loans": [_loan_read(n) for n in names]}
 
 
-def _resolve_loan_account(payload_account_id, lender_type: str) -> str:
+def _resolve_loan_account(payload_account_id, lender_type: str):
+	# OWNER_PERSONAL is a memo (the owner's own KTA): no PT POI GL account.
+	if lender_type == "OWNER_PERSONAL":
+		return None
 	if payload_account_id:
 		acc = _resolve_account(payload_account_id)
 		if not acc:
 			frappe.throw("Loan account not found: %s" % payload_account_id, exc=frappe.DoesNotExistError)
 		return acc.name
 	code = DEFAULT_ACCOUNT_BY_LENDER.get(lender_type, "2-1700")
+	if code is None:
+		return None
 	acc = _account_by_number(code)
 	if not acc:
 		frappe.throw("Default loan account %s not found" % code)
@@ -855,20 +894,41 @@ def _loan_create(payload: dict) -> dict:
 		]
 		if missing:
 			frappe.throw("For a BANK loan these are required: %s" % ", ".join(missing))
+	if lender_type == "OWNER_PERSONAL":
+		missing = [
+			label
+			for label, val in [
+				("lenderName", payload.get("lenderName")),
+				("principal", payload.get("principal")),
+				("monthlyInstallment", payload.get("monthlyInstallment")),
+				("tenorMonths", payload.get("tenorMonths")),
+			]
+			if not val
+		]
+		if missing:
+			frappe.throw("For a personal (OWNER_PERSONAL) loan these are required: %s" % ", ".join(missing))
 	if not payload.get("lenderName") and not payload.get("bankName"):
 		frappe.throw("lenderName (or bankName) is required")
 
+	# Only OWNER capital loans revolve; installment loans (BANK / OWNER_PERSONAL)
+	# amortise to zero, so they are not revolving by default.
 	is_rev = payload.get("isRevolving")
-	is_revolving = is_rev if is_rev is not None else (lender_type != "BANK")
+	is_revolving = is_rev if is_rev is not None else (lender_type == "OWNER")
+	# A personal KTA is the owner's own debt — never a PT POI balance-sheet item.
+	company_liability = False if lender_type == "OWNER_PERSONAL" else payload.get("isCompanyLiability", True)
 
 	doc = frappe.new_doc("Orion Loan")
 	doc.loan_number = payload.get("loanNumber") or payload.get("lenderName") or payload.get("bankName")
 	doc.bank_name = payload.get("bankName")
 	doc.lender_type = lender_type
 	doc.lender_name = payload.get("lenderName") or payload.get("bankName")
+	if payload.get("ownerLoan"):
+		doc.owner_loan = _resolve_name("Orion Loan", payload.get("ownerLoan"))
 	doc.is_revolving = 1 if is_revolving else 0
-	doc.is_company_liability = 1 if payload.get("isCompanyLiability", True) else 0
-	doc.doc_prefix = payload.get("docPrefix")
+	doc.is_company_liability = 1 if company_liability else 0
+	doc.doc_prefix = payload.get("docPrefix") or (
+		DEFAULT_PERSONAL_PREFIX if lender_type == "OWNER_PERSONAL" else None
+	)
 	doc.account = _resolve_loan_account(payload.get("accountId"), lender_type)
 	doc.principal = _money(payload.get("principal")) or 0
 	if payload.get("interestRate") is not None:
@@ -882,7 +942,296 @@ def _loan_create(payload: dict) -> dict:
 	doc.notes = payload.get("notes")
 	doc.flags.ignore_permissions = True
 	doc.insert()
+
+	# Fixed-installment loans get a per-month schedule; the owner's personal KTA
+	# also gets an origination memo drawdown so outstanding starts at principal.
+	if lender_type in INSTALLMENT_LENDER_TYPES:
+		_generate_schedule(doc.name, doc)
+	if lender_type == "OWNER_PERSONAL":
+		_ensure_origination_event(doc.name, doc)
 	return _loan_read(doc.name, with_aggregates=False)
+
+
+def _loan_update(ident: str, payload: dict) -> dict:
+	"""PATCH /:id — edit an editable loan. Terms are only editable while the loan
+	has no repayment history (mirrors the frontend's edit affordance)."""
+	name = _loan_name(ident)
+	loan = frappe.get_doc("Orion Loan", name)
+	has_repayment = frappe.db.exists(
+		"Orion Loan Event", {"loan": name, "direction": "REPAYMENT"}
+	)
+
+	# Identity / soft fields — always editable.
+	for field, key in (
+		("lender_name", "lenderName"),
+		("bank_name", "bankName"),
+		("loan_number", "loanNumber"),
+		("notes", "notes"),
+	):
+		if key in payload and payload.get(key) is not None:
+			setattr(loan, field, payload.get(key))
+	if "businessLine" in payload and payload.get("businessLine"):
+		loan.business_line = payload.get("businessLine")
+	if "ownerLoan" in payload:
+		loan.owner_loan = (
+			_resolve_name("Orion Loan", payload.get("ownerLoan")) if payload.get("ownerLoan") else None
+		)
+	if loan.lender_type != "OWNER_PERSONAL" and "isCompanyLiability" in payload:
+		loan.is_company_liability = 1 if payload.get("isCompanyLiability") else 0
+
+	# Terms drive the schedule / balance — lock them once money has moved.
+	terms_changed = False
+	if not has_repayment:
+		for field, key, conv in (
+			("principal", "principal", _money),
+			("monthly_installment", "monthlyInstallment", _money),
+			("tenor_months", "tenorMonths", lambda v: v),
+			("start_date", "startDate", _pdate),
+			("maturity_date", "maturityDate", lambda v: _pdate(v) if v else None),
+		):
+			if key in payload:
+				setattr(loan, field, conv(payload.get(key)))
+				terms_changed = True
+		if "interestRate" in payload and payload.get("interestRate") is not None:
+			loan.interest_rate = float(_wdec(payload.get("interestRate")) * 100)
+
+	loan.flags.ignore_permissions = True
+	loan.save()
+
+	# If terms moved and there is no history yet, rebuild the schedule + origination.
+	if terms_changed and not has_repayment and loan.lender_type in INSTALLMENT_LENDER_TYPES:
+		_generate_schedule(name, loan)
+		if loan.lender_type == "OWNER_PERSONAL":
+			_ensure_origination_event(name, loan)
+	return _loan_read(name)
+
+
+def _loan_delete(ident: str) -> dict:
+	"""DELETE /:id — remove a loan with no financial history. Any generated
+	installment schedule and a lone origination memo event are cleaned up first."""
+	name = _loan_name(ident)
+	real_events = frappe.get_all(
+		"Orion Loan Event",
+		filters={"loan": name},
+		fields=["name", "direction", "journal_entry"],
+	)
+	# A memo loan's only permissible leftover is its origination DRAWDOWN (no JE).
+	blocking = [
+		e for e in real_events
+		if e.journal_entry or e.direction == "REPAYMENT"
+	]
+	if blocking:
+		frappe.throw("Cannot delete a loan that already has posted or repayment events")
+
+	for i in frappe.get_all("Orion Loan Installment", filters={"loan": name}, pluck="name"):
+		frappe.delete_doc("Orion Loan Installment", i, force=1, ignore_permissions=True)
+	for e in real_events:
+		frappe.delete_doc("Orion Loan Event", e.name, force=1, ignore_permissions=True)
+	frappe.delete_doc("Orion Loan", name, force=1, ignore_permissions=True)
+	return {"deleted": True}
+
+
+# ── installment schedule ─────────────────────────────────────────────────────
+
+
+def _installment_read(i) -> dict:
+	return {
+		"id": i.orion_legacy_id or i.name,
+		"installmentNo": i.installment_no,
+		"dueDate": _iso_date(i.due_date),
+		"duePrincipal": _s2(i.due_principal),
+		"dueInterest": _s2(i.due_interest),
+		"dueTotal": _s2(i.due_total),
+		"status": i.status,
+		"paidDate": _iso_date(i.paid_date) if i.paid_date else None,
+		"paidAmount": _s2n(i.paid_amount),
+		"loanEventId": _legacy_or_name("Orion Loan Event", i.loan_event) if i.loan_event else None,
+		"notes": i.notes,
+	}
+
+
+def _loan_installments(name: str) -> list:
+	return frappe.get_all(
+		"Orion Loan Installment",
+		filters={"loan": name},
+		fields=_INSTALLMENT_FIELDS,
+		order_by="installment_no asc",
+	)
+
+
+def _schedule_summary(rows) -> dict:
+	if not rows:
+		return None
+	today = frappe.utils.getdate()
+	paid = [r for r in rows if r.status == "PAID"]
+	unpaid = [r for r in rows if r.status != "PAID"]
+	overdue = sum(1 for r in unpaid if frappe.utils.getdate(r.due_date) < today)
+	return {
+		"total": len(rows),
+		"paid": len(paid),
+		"remaining": len(unpaid),
+		"overdue": overdue,
+		"nextDueDate": _iso_date(unpaid[0].due_date) if unpaid else None,
+		"nextDueAmount": _s2(unpaid[0].due_total) if unpaid else None,
+	}
+
+
+def _generate_schedule(name: str, loan) -> int:
+	"""(Re)build the installment schedule from the loan's terms. Only UNPAID rows
+	are replaced, so re-running never disturbs installments already marked paid."""
+	if not (loan.tenor_months and loan.monthly_installment and loan.start_date):
+		return 0
+	rows = build_schedule(
+		start_date=str(loan.start_date),
+		tenor_months=loan.tenor_months,
+		monthly_installment=loan.monthly_installment,
+		principal=loan.principal or 0,
+	)
+	existing = {
+		r.installment_no: r
+		for r in frappe.get_all(
+			"Orion Loan Installment",
+			filters={"loan": name},
+			fields=["name", "installment_no", "status"],
+		)
+	}
+	created = 0
+	for r in rows:
+		prev = existing.get(r["installment_no"])
+		if prev and prev.status == "PAID":
+			continue
+		if prev:
+			frappe.delete_doc("Orion Loan Installment", prev.name, force=1, ignore_permissions=True)
+		inst = frappe.new_doc("Orion Loan Installment")
+		inst.loan = name
+		inst.installment_no = r["installment_no"]
+		inst.due_date = r["due_date"]
+		inst.due_principal = _money(r["due_principal"])
+		inst.due_interest = _money(r["due_interest"])
+		inst.due_total = _money(r["due_total"])
+		inst.status = "UPCOMING"
+		inst.flags.ignore_permissions = True
+		inst.insert()
+		created += 1
+	return created
+
+
+def _ensure_origination_event(name: str, loan) -> None:
+	"""Give a memo (OWNER_PERSONAL) loan a single origination DRAWDOWN so its
+	outstanding starts at the full principal. No journal entry — it is off-book."""
+	if frappe.db.exists("Orion Loan Event", {"loan": name, "direction": "DRAWDOWN"}):
+		return
+	principal = _wdec(loan.principal)
+	if principal <= 0:
+		return
+	# Coerce to a date — callers may set start_date as a raw string.
+	when = frappe.utils.getdate(loan.start_date)
+	ev = frappe.new_doc("Orion Loan Event")
+	ev.loan = name
+	ev.direction = "DRAWDOWN"
+	ev.doc_code = next_doc_code(loan=name, direction="DRAWDOWN", when=when, prefix=loan.doc_prefix)
+	ev.date = when
+	ev.principal_amount = _money(principal)
+	ev.interest_amount = 0
+	ev.total_amount = _money(principal)
+	ev.remaining_balance = _money(principal)
+	ev.notes = "Saldo awal — pencairan pinjaman pribadi pemilik (memo, non-GL)"
+	ev.flags.ignore_permissions = True
+	ev.insert()
+
+
+def _loan_schedule_read(ident: str) -> dict:
+	name = _loan_name(ident)
+	rows = _loan_installments(name)
+	return {
+		"installments": [_installment_read(i) for i in rows],
+		"scheduleSummary": _schedule_summary(rows),
+	}
+
+
+def _loan_schedule_regenerate(ident: str) -> dict:
+	name = _loan_name(ident)
+	loan = frappe.get_doc("Orion Loan", name)
+	created = _generate_schedule(name, loan)
+	if loan.lender_type == "OWNER_PERSONAL":
+		_ensure_origination_event(name, loan)
+	return {"loan": _loan_read(name), "created": created}
+
+
+def _installment_pay(ident: str, no: str, payload: dict) -> dict:
+	"""POST /:id/installments/:no/pay — mark a scheduled installment paid.
+
+	This is the owner paying the provider (Layer B): a MEMO repayment event is
+	recorded against the loan (no journal entry, no PT POI GL impact). PT
+	POI-funded installments are handled separately during owner reconciliation.
+	"""
+	name = _loan_name(ident)
+	loan = frappe.get_doc("Orion Loan", name)
+	inst_name = frappe.db.get_value(
+		"Orion Loan Installment", {"loan": name, "installment_no": int(no)}, "name"
+	)
+	if not inst_name:
+		frappe.throw("Installment %s not found" % no, exc=frappe.DoesNotExistError)
+	inst = frappe.get_doc("Orion Loan Installment", inst_name)
+	if inst.status == "PAID":
+		frappe.throw("Installment already paid")
+
+	when = _pdate(payload.get("date")) or inst.due_date
+	principal = _wdec(inst.due_principal)
+	interest = _wdec(inst.due_interest)
+	paid_amount = _wdec(payload.get("amount")) if payload.get("amount") is not None else (principal + interest)
+
+	ev = frappe.new_doc("Orion Loan Event")
+	ev.loan = name
+	ev.direction = "REPAYMENT"
+	ev.doc_code = next_doc_code(loan=name, direction="REPAYMENT", when=when, prefix=None)
+	ev.date = when
+	ev.principal_amount = _money(principal)
+	ev.interest_amount = _money(interest)
+	ev.total_amount = _money(principal + interest)
+	ev.remaining_balance = 0
+	ev.channel = payload.get("channel")
+	ev.reference = payload.get("reference")
+	ev.notes = payload.get("notes") or ("Cicilan #%s (memo, dibayar pemilik ke pemberi pinjaman)" % no)
+	ev.flags.ignore_permissions = True
+	ev.insert()
+
+	inst.status = "PAID"
+	inst.paid_date = when
+	inst.paid_amount = _money(paid_amount)
+	inst.loan_event = ev.name
+	inst.flags.ignore_permissions = True
+	inst.save()
+
+	outstanding = _sync_loan(name, loan.is_revolving)
+	frappe.db.set_value("Orion Loan Event", ev.name, "remaining_balance", _money(outstanding))
+	return {"loan": _loan_read(name)}
+
+
+def _installment_unpay(ident: str, no: str) -> dict:
+	"""POST /:id/installments/:no/unpay — undo a memo installment payment."""
+	name = _loan_name(ident)
+	loan = frappe.get_doc("Orion Loan", name)
+	inst_name = frappe.db.get_value(
+		"Orion Loan Installment", {"loan": name, "installment_no": int(no)}, "name"
+	)
+	if not inst_name:
+		frappe.throw("Installment %s not found" % no, exc=frappe.DoesNotExistError)
+	inst = frappe.get_doc("Orion Loan Installment", inst_name)
+	if inst.status != "PAID":
+		frappe.throw("Installment is not paid")
+	if inst.loan_event:
+		if frappe.db.get_value("Orion Loan Event", inst.loan_event, "journal_entry"):
+			frappe.throw("Installment is settled by a posted journal entry; reverse that instead")
+		frappe.delete_doc("Orion Loan Event", inst.loan_event, force=1, ignore_permissions=True)
+	inst.status = "UPCOMING"
+	inst.paid_date = None
+	inst.paid_amount = 0
+	inst.loan_event = None
+	inst.flags.ignore_permissions = True
+	inst.save()
+	_sync_loan(name, loan.is_revolving)
+	return {"loan": _loan_read(name)}
 
 
 def _loan_unlinked(ident: str) -> dict:
@@ -944,6 +1293,9 @@ def _loan_drawdown(ident: str, payload: dict) -> dict:
 	if not when:
 		frappe.throw("date is required")
 
+	# A memo loan (owner's personal KTA) is off PT POI's books: no GL account,
+	# so drawdowns record the event only, with no journal entry.
+	is_memo = (not loan.account) or (not loan.is_company_liability)
 	je_id = payload.get("journalEntryId")
 	if je_id:
 		je_name = _resolve_name("Journal Entry", je_id)
@@ -955,6 +1307,8 @@ def _loan_drawdown(ident: str, payload: dict) -> dict:
 			"Journal Entry Account", {"parent": je_name, "account": loan.account}
 		):
 			frappe.throw("Journal entry does not touch this loan's liability account")
+	elif is_memo:
+		je_name = None
 	else:
 		if not payload.get("bankAccountId"):
 			frappe.throw("bankAccountId is required when not linking an existing journal entry")
@@ -1011,13 +1365,15 @@ def _loan_repayment(ident: str, payload: dict) -> dict:
 	)
 	if current_status != "ACTIVE":
 		frappe.throw("Loan is already paid off")
+	is_memo = (not loan.account) or (not loan.is_company_liability)
 	if (
 		not payload.get("date")
 		or payload.get("principalAmount") is None
 		or payload.get("interestAmount") is None
-		or not payload.get("bankAccountId")
+		or (not is_memo and not payload.get("bankAccountId"))
 	):
-		frappe.throw("date, principalAmount, interestAmount, and bankAccountId are required")
+		need = "date, principalAmount, interestAmount" + ("" if is_memo else ", and bankAccountId")
+		frappe.throw("%s are required" % need)
 
 	principal = _wdec(payload.get("principalAmount"))
 	interest = _wdec(payload.get("interestAmount"))
@@ -1025,37 +1381,41 @@ def _loan_repayment(ident: str, payload: dict) -> dict:
 	if principal - outstanding_before > Decimal("0.01"):
 		frappe.throw("Principal amount exceeds outstanding balance (%s)" % outstanding_before)
 
-	bank = _require_account(payload.get("bankAccountId"))
 	when = _pdate(payload.get("date"))
 
-	lines = []
-	if principal > 0:
-		if not loan.account:
-			frappe.throw("Loan has no liability account configured")
+	if is_memo:
+		# Owner paying their own provider — off PT POI's books, no journal entry.
+		je = None
+	else:
+		bank = _require_account(payload.get("bankAccountId"))
+		lines = []
+		if principal > 0:
+			if not loan.account:
+				frappe.throw("Loan has no liability account configured")
+			lines.append(
+				{"account": loan.account, "debit": principal, "credit": Decimal("0"),
+				 "description": ("Cicilan pokok — %s" % (loan.lender_name or loan.loan_number or "")).strip()}
+			)
+		if interest > 0:
+			ia = _account_by_number(LOAN_INTEREST_CODE)
+			if not ia:
+				frappe.throw("Interest expense account %s not found" % LOAN_INTEREST_CODE)
+			lines.append(
+				{"account": ia.name, "debit": interest, "credit": Decimal("0"),
+				 "description": ("Bunga pinjaman — %s" % (loan.loan_number or loan.lender_name or "")).strip()}
+			)
 		lines.append(
-			{"account": loan.account, "debit": principal, "credit": Decimal("0"),
-			 "description": ("Cicilan pokok — %s" % (loan.lender_name or loan.loan_number or "")).strip()}
+			{"account": bank.name, "debit": Decimal("0"), "credit": total,
+			 "description": ("Pembayaran pinjaman — %s" % (loan.lender_name or loan.loan_number or "")).strip()}
 		)
-	if interest > 0:
-		ia = _account_by_number(LOAN_INTEREST_CODE)
-		if not ia:
-			frappe.throw("Interest expense account %s not found" % LOAN_INTEREST_CODE)
-		lines.append(
-			{"account": ia.name, "debit": interest, "credit": Decimal("0"),
-			 "description": ("Bunga pinjaman — %s" % (loan.loan_number or loan.lender_name or "")).strip()}
+		je = _post_journal_entry(
+			posting_date=when,
+			description=("Cicilan %s — %s" % (loan.loan_number or "", loan.lender_name or loan.bank_name or "")).strip(),
+			reference=payload.get("reference") or loan.loan_number,
+			source_type="LOAN_PAYMENT",
+			lines=lines,
+			project=_resolve_project_or_throw(payload.get("projectId")) if payload.get("projectId") else None,
 		)
-	lines.append(
-		{"account": bank.name, "debit": Decimal("0"), "credit": total,
-		 "description": ("Pembayaran pinjaman — %s" % (loan.lender_name or loan.loan_number or "")).strip()}
-	)
-	je = _post_journal_entry(
-		posting_date=when,
-		description=("Cicilan %s — %s" % (loan.loan_number or "", loan.lender_name or loan.bank_name or "")).strip(),
-		reference=payload.get("reference") or loan.loan_number,
-		source_type="LOAN_PAYMENT",
-		lines=lines,
-		project=_resolve_project_or_throw(payload.get("projectId")) if payload.get("projectId") else None,
-	)
 
 	# Orion Loan Event autonames from doc_code, so one is always allocated.
 	doc_code = payload.get("docCode") or next_doc_code(
@@ -1070,7 +1430,7 @@ def _loan_repayment(ident: str, payload: dict) -> dict:
 	ev.interest_amount = _money(interest)
 	ev.total_amount = _money(total)
 	ev.remaining_balance = 0
-	ev.journal_entry = je.name
+	ev.journal_entry = je.name if je else None
 	ev.project = _resolve_name("Project", payload.get("projectId")) if payload.get("projectId") else None
 	ev.channel = payload.get("channel")
 	ev.reference = payload.get("reference")
@@ -1079,7 +1439,8 @@ def _loan_repayment(ident: str, payload: dict) -> dict:
 	ev.insert()
 	outstanding = _sync_loan(name, loan.is_revolving)
 	frappe.db.set_value("Orion Loan Event", ev.name, "remaining_balance", _money(outstanding))
-	return {"loan": _loan_read(name), "journalEntry": _je_summary(je.name, _legacy_or_name("Orion Loan", name))}
+	je_summary = _je_summary(je.name, _legacy_or_name("Orion Loan", name)) if je else None
+	return {"loan": _loan_read(name), "journalEntry": je_summary}
 
 
 # ── disbursements (cash advances) ────────────────────────────────────────────

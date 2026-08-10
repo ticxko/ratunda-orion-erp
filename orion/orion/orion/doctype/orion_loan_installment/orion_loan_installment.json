@@ -1,0 +1,174 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-08-09 09:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "loan",
+  "installment_no",
+  "status",
+  "column_break_identity",
+  "due_date",
+  "paid_date",
+  "section_break_amounts",
+  "due_principal",
+  "due_interest",
+  "due_total",
+  "column_break_amounts",
+  "paid_amount",
+  "loan_event",
+  "section_break_detail",
+  "notes",
+  "section_break_legacy",
+  "orion_legacy_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "loan",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Loan",
+   "options": "Orion Loan",
+   "reqd": 1
+  },
+  {
+   "fieldname": "installment_no",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Installment No",
+   "reqd": 1
+  },
+  {
+   "default": "UPCOMING",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "UPCOMING\nDUE\nPAID\nPARTIAL\nSKIPPED"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "due_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Due Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "paid_date",
+   "fieldtype": "Date",
+   "label": "Paid Date"
+  },
+  {
+   "fieldname": "section_break_amounts",
+   "fieldtype": "Section Break",
+   "label": "Amounts"
+  },
+  {
+   "fieldname": "due_principal",
+   "fieldtype": "Currency",
+   "label": "Due Principal"
+  },
+  {
+   "fieldname": "due_interest",
+   "fieldtype": "Currency",
+   "label": "Due Interest"
+  },
+  {
+   "fieldname": "due_total",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Due Total"
+  },
+  {
+   "fieldname": "column_break_amounts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "paid_amount",
+   "fieldtype": "Currency",
+   "label": "Paid Amount"
+  },
+  {
+   "description": "The memo REPAYMENT event created when this installment was marked paid.",
+   "fieldname": "loan_event",
+   "fieldtype": "Link",
+   "label": "Loan Event",
+   "options": "Orion Loan Event"
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "section_break_legacy",
+   "fieldtype": "Section Break",
+   "label": "Legacy"
+  },
+  {
+   "fieldname": "orion_legacy_id",
+   "fieldtype": "Data",
+   "label": "Orion Legacy ID",
+   "unique": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-08-09 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Orion",
+ "name": "Orion Loan Installment",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Admin",
+   "share": 1,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Orion Project Admin",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
