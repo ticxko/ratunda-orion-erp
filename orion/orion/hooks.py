@@ -10,7 +10,7 @@ required_apps = ["erpnext"]
 after_install = "orion.install.after_install"
 
 fixtures = [
-    {"dt": "Role", "filters": [["name", "in", ["Orion Admin", "Orion Project Admin"]]]},
+    {"dt": "Role", "filters": [["name", "in", ["Orion Admin", "Orion Project Admin", "Orion Projects Only"]]]},
     {
         "dt": "Custom Field",
         "filters": [
