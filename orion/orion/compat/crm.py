@@ -29,13 +29,17 @@ timestamps as naive ISO (accounting._iso). ids in payloads resolve via
 orion_legacy_id first then ERPNext name (accounting._resolve_name); every response
 id is orion_legacy_id when present else doc.name.
 
+Lead contact fields (clientSalutation, clientAddress, source, assignedTo, notes)
+round-trip through their orion_* custom fields (orion_client_salutation /
+orion_client_address / orion_source / orion_assigned_to / orion_notes — added in
+"Phase B: backfill lead/client contact fields"); _lead_create / _lead_update write
+them and _lead_read returns them. status reads from orion_lead_status (raw Orion
+enum). Still NOT carried: clientId, and _count.projects (always 0 — ERPNext Project
+has no lead link, the same gap supply_chain.py notes as `leadId: None`, so a
+contract's `lead` is always null too).
+
 Fields the Phase-A schema does NOT carry (emitted null/default, cannot round-trip
-without new custom fields — a launching-agent decision, not touched here):
-  - Lead:  clientSalutation, clientAddress, source, assignedTo, notes, clientId.
-           These were dropped by migrate/leads.py and have no Lead field. status
-           reads from orion_lead_status (raw Orion enum); _count.projects is 0
-           because ERPNext Project carries no lead link (same gap supply_chain.py
-           notes as `leadId: None`), so a contract's `lead` is always null too.
+without new custom fields):
   - Customer/Client: salutation, phone, email, address, notes have no Customer
            field (migrate/customers.py stored only customer_name + disabled +
            orion_legacy_id), so they read null/"Pak". _count.leads is 0 (no link);
@@ -307,6 +311,14 @@ def _lead_create(payload: dict) -> dict:
     doc.orion_service_interest = payload.get("serviceInterest")
     doc.orion_estimated_value = _money(_wdec(est)) if est not in (None, "") else None
     doc.orion_short_name = (payload.get("shortName") or "").strip() or None
+    # Contact fields carried on their orion_* custom fields (crm/index.ts POST parity:
+    # source defaults to REFERRAL, the rest pass through null). The read path already
+    # returns these — without writing them here the create silently dropped them.
+    doc.orion_client_salutation = salutation
+    doc.orion_client_address = payload.get("clientAddress")
+    doc.orion_source = payload.get("source") or "REFERRAL"
+    doc.orion_assigned_to = payload.get("assignedTo")
+    doc.orion_notes = payload.get("notes")
     doc.flags.ignore_permissions = True
     _insert_named(doc)
     return _lead_read(_lead_row(doc.name))
@@ -335,7 +347,18 @@ def _lead_update(ident: str, payload: dict) -> dict:
     if "status" in payload:
         doc.orion_lead_status = payload["status"]
         doc.status = LEAD_STATUS_MAP.get(payload["status"], doc.status)
-    # clientSalutation / clientAddress / source / assignedTo / notes: no Lead field.
+    # Contact fields carried on their orion_* custom fields (crm/index.ts PATCH parity:
+    # only touch keys the payload actually sends). The read path already returns these.
+    if "clientSalutation" in payload:
+        doc.orion_client_salutation = payload["clientSalutation"]
+    if "clientAddress" in payload:
+        doc.orion_client_address = payload["clientAddress"]
+    if "source" in payload:
+        doc.orion_source = payload["source"]
+    if "assignedTo" in payload:
+        doc.orion_assigned_to = payload["assignedTo"]
+    if "notes" in payload:
+        doc.orion_notes = payload["notes"]
     doc.flags.ignore_permissions = True
     doc.save()
     return _lead_read(_lead_row(name))
