@@ -34,7 +34,9 @@ round-trip through their orion_* custom fields (orion_client_salutation /
 orion_client_address / orion_source / orion_assigned_to / orion_notes — added in
 "Phase B: backfill lead/client contact fields"); _lead_create / _lead_update write
 them and _lead_read returns them. status reads from orion_lead_status (raw Orion
-enum). Still NOT carried: clientId, and _count.projects (always 0 — ERPNext Project
+enum). The shortlist axis (isPriority / followupDate) rides orion_is_priority (Check)
+and orion_followup_date (Date) — orthogonal to status so flagging a hot lead never
+touches its pipeline stage; the next-action text reuses the existing notes field. Still NOT carried: clientId, and _count.projects (always 0 — ERPNext Project
 has no lead link, the same gap supply_chain.py notes as `leadId: None`, so a
 contract's `lead` is always null too).
 
@@ -102,6 +104,7 @@ LEAD_FIELDS = [
     "orion_short_name", "orion_lead_status", "orion_legacy_id",
     "orion_client_salutation", "orion_client_address", "orion_source",
     "orion_assigned_to", "orion_notes",
+    "orion_is_priority", "orion_followup_date",
 ]
 CUSTOMER_FIELDS = [
     "name", "customer_name", "disabled", "orion_legacy_id", "creation", "modified",
@@ -250,6 +253,10 @@ def _lead_read(r) -> dict:
         "status": r.orion_lead_status or "PROSPECT",
         "assignedTo": r.orion_assigned_to,
         "notes": r.orion_notes,
+        # Shortlist axis (orthogonal to status): a priority star + optional
+        # follow-up date; the next-action text rides the existing `notes` field.
+        "isPriority": bool(r.orion_is_priority),
+        "followupDate": _iso_date(r.orion_followup_date),
         "clientId": None,
         "createdAt": _iso(r.creation),
         "updatedAt": _iso(r.modified),
@@ -319,6 +326,8 @@ def _lead_create(payload: dict) -> dict:
     doc.orion_source = payload.get("source") or "REFERRAL"
     doc.orion_assigned_to = payload.get("assignedTo")
     doc.orion_notes = payload.get("notes")
+    doc.orion_is_priority = 1 if payload.get("isPriority") else 0
+    doc.orion_followup_date = payload.get("followupDate") or None
     doc.flags.ignore_permissions = True
     _insert_named(doc)
     return _lead_read(_lead_row(doc.name))
@@ -359,6 +368,12 @@ def _lead_update(ident: str, payload: dict) -> dict:
         doc.orion_assigned_to = payload["assignedTo"]
     if "notes" in payload:
         doc.orion_notes = payload["notes"]
+    # Shortlist axis — a bare star toggle (isPriority-only PATCH) never disturbs
+    # any pipeline field; followupDate accepts an ISO date or clears on null/"".
+    if "isPriority" in payload:
+        doc.orion_is_priority = 1 if payload["isPriority"] else 0
+    if "followupDate" in payload:
+        doc.orion_followup_date = payload["followupDate"] or None
     doc.flags.ignore_permissions = True
     doc.save()
     return _lead_read(_lead_row(name))

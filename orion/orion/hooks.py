@@ -71,6 +71,8 @@ fixtures = [
                     "Lead-orion_source",
                     "Lead-orion_assigned_to",
                     "Lead-orion_notes",
+                    "Lead-orion_is_priority",
+                    "Lead-orion_followup_date",
                     "Customer-orion_salutation",
                     "Customer-orion_phone",
                     "Customer-orion_email",
