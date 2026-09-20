@@ -141,6 +141,22 @@ def _clean_phone(raw):
     return p
 
 
+def _set_client_name(doc, full_name):
+    """Write Orion's single `clientName` onto a Lead.
+
+    Stock Lead.validate rebuilds `lead_name` from first/middle/last_name, so
+    assigning `lead_name` alone is silently reverted on save — creates only
+    appeared to work because first_name is empty at insert and Frappe splits
+    lead_name afterwards. Set the parts and let validate rebuild the same
+    string back.
+    """
+    parts = (full_name or "").split()
+    doc.first_name = parts[0] if parts else None
+    doc.middle_name = " ".join(parts[1:-1]) if len(parts) > 2 else None
+    doc.last_name = parts[-1] if len(parts) > 1 else None
+    doc.lead_name = full_name
+
+
 def _to_date(value):
     """ISO string / date -> YYYY-MM-DD (or None), like supply_chain._to_date."""
     return value[:10] if value else None
@@ -310,7 +326,7 @@ def _lead_create(payload: dict) -> dict:
     est = payload.get("estimatedValue")
     doc = frappe.new_doc("Lead")
     doc.name = _next_lead_code()
-    doc.lead_name = client_name
+    _set_client_name(doc, client_name)
     doc.phone = cleaned_phone
     doc.status = LEAD_STATUS_MAP["PROSPECT"]
     doc.orion_lead_status = "PROSPECT"
@@ -342,7 +358,7 @@ def _lead_update(ident: str, payload: dict) -> dict:
     if "shortName" in payload:
         doc.orion_short_name = (payload.get("shortName") or "").strip() or None
     if "clientName" in payload:
-        doc.lead_name = payload["clientName"]
+        _set_client_name(doc, payload["clientName"])
     if "clientPhone" in payload:
         cp = payload["clientPhone"]
         doc.phone = _clean_phone(cp) if cp else cp
