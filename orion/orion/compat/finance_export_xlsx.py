@@ -51,13 +51,10 @@ from orion.compat.expense_report_xlsx import (
 	ADDRESS,
 	BLACK,
 	BOX,
-	LAVENDER,
 	MONTHS_ID,
-	PURPLE,
 	RP_FMT,
 	THIN,
 	WHITE,
-	_add_logo,
 )
 
 # Grid money format: positive;negative;zero. Parentheses for negatives, an em
@@ -69,6 +66,44 @@ MONEY_FMT = '#,##0;(#,##0);"—"'
 FONT = "Verdana"
 GUTTER_WIDTH = 2  # column A, matching the Laporan Pengeluaran workbook
 FIRST_COL = 2  # content starts in column B
+
+# Branding follows the business line the report was run for, so a workbook is
+# recognisably the entity's own. Ratunda keeps the purple of the Laporan
+# Pengeluaran workbook; Poiesis uses its brand pink (pink-dark-rose over
+# pink-blush, from the Poiesis design-system tokens — the primary #D9546A is
+# too light to carry white header text); a combined run is neither entity, so it
+# takes a neutral company blue and shows both marks, Poiesis first.
+THEMES = {
+	"RATUNDA_RENOVASI": {
+		"bar": "FF7030A0",
+		"band": "FFE4DFEC",
+		"logos": ("ratunda-logo.png",),
+	},
+	"POIESIS_STUDIO": {
+		"bar": "FFB83050",
+		"band": "FFF2C4CC",
+		"logos": ("poiesis-logo.png",),
+	},
+	"ALL": {
+		"bar": "FF1F4E79",
+		"band": "FFDCE6F1",
+		"logos": ("poiesis-logo.png", "ratunda-logo.png"),
+	},
+}
+
+
+def theme_for(business_line: str) -> dict:
+	"""Palette + marks for a business line; unknown lines fall back to combined."""
+	return THEMES.get(business_line or "ALL", THEMES["ALL"])
+
+
+# Logo geometry. Both marks are 143px tall at source, so normalising on a common
+# display height and deriving width from each one's own aspect ratio keeps them
+# optically matched when they sit side by side.
+LOGO_HEIGHT_EMU = 426085  # ~45px, the height the Laporan Pengeluaran mark uses
+LOGO_LEFT_EMU = 47625
+LOGO_TOP_EMU = 57150
+LOGO_GAP_EMU = 190500  # ~20px between two marks
 
 RED_FILL = PatternFill("solid", fgColor="FFFFC7CE")
 RED_FONT = Font(name=FONT, size=10, bold=True, color="FF9C0006")
@@ -91,18 +126,47 @@ def _month_end_label(ym: int) -> str:
 	return "per %d %s %d" % (last, MONTHS_ID[month - 1][:3], year)
 
 
-def build_workbook(sheets: list, meta: dict, logo_path: str | None = None) -> Workbook:
-	"""Render sheet specs into a workbook. meta carries the cover-sheet facts."""
+def _add_logos(ws, logo_paths: list):
+	"""Lay one or more brand marks across the letterhead row, left to right.
+
+	Not expense_report_xlsx._add_logo: that one hard-codes a single mark at one
+	fixed size. Here the width is derived per image from its own aspect ratio at
+	a shared display height, so a combined Poiesis + Ratunda letterhead stays
+	optically even instead of stretching either mark.
+	"""
+	from openpyxl.drawing.image import Image
+	from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+	from openpyxl.drawing.xdr import XDRPositiveSize2D
+
+	offset = LOGO_LEFT_EMU
+	for path in logo_paths:
+		img = Image(path)
+		ratio = (img.width / img.height) if img.height else 3.5
+		width = int(LOGO_HEIGHT_EMU * ratio)
+		img.anchor = OneCellAnchor(
+			_from=AnchorMarker(col=1, colOff=offset, row=0, rowOff=LOGO_TOP_EMU),
+			ext=XDRPositiveSize2D(cx=width, cy=LOGO_HEIGHT_EMU),
+		)
+		ws.add_image(img)
+		offset += width + LOGO_GAP_EMU
+
+
+def build_workbook(
+	sheets: list, meta: dict, logo_paths: list | None = None, theme: dict | None = None
+) -> Workbook:
+	"""Render sheet specs into a workbook. meta carries the cover-sheet facts;
+	theme carries the palette and marks for the business line (see theme_for)."""
+	theme = theme or THEMES["ALL"]
 	wb = Workbook()
 	wb.remove(wb.active)
 	for spec in sheets:
-		_build_sheet(wb, spec, meta, logo_path)
+		_build_sheet(wb, spec, meta, logo_paths or [], theme)
 	if not wb.sheetnames:  # never hand back a workbook with zero sheets
 		wb.create_sheet("KOSONG")
 	return wb
 
 
-def _build_sheet(wb: Workbook, spec: dict, meta: dict, logo_path: str | None):
+def _build_sheet(wb: Workbook, spec: dict, meta: dict, logo_paths: list, theme: dict):
 	columns = spec.get("columns") or []
 	ncols = max(len(columns), 1)
 	name = (spec.get("name") or "SHEET")[:31]
@@ -113,17 +177,17 @@ def _build_sheet(wb: Workbook, spec: dict, meta: dict, logo_path: str | None):
 		ws.column_dimensions[get_column_letter(FIRST_COL + i)].width = col.get("width", 14)
 
 	last_letter = get_column_letter(FIRST_COL + ncols - 1)
-	row = _write_header(ws, spec, meta, ncols, last_letter, logo_path)
+	row = _write_header(ws, spec, meta, ncols, last_letter, logo_paths, theme)
 
 	header_row = row
-	_write_column_headers(ws, columns, header_row)
+	_write_column_headers(ws, columns, header_row, theme)
 	row = header_row + 1
 
 	money_fmt = spec.get("money_fmt") or MONEY_FMT
 	indent_col = spec.get("indent_col", 0)
 	body_start = row
 	for r in spec.get("rows") or []:
-		_write_row(ws, r, columns, row, money_fmt, indent_col)
+		_write_row(ws, r, columns, row, money_fmt, indent_col, theme)
 		row += 1
 	body_end = row - 1
 
@@ -142,12 +206,12 @@ def _build_sheet(wb: Workbook, spec: dict, meta: dict, logo_path: str | None):
 	return ws
 
 
-def _write_header(ws, spec: dict, meta: dict, ncols: int, last_letter: str, logo_path) -> int:
+def _write_header(ws, spec: dict, meta: dict, ncols: int, last_letter: str, logo_paths: list, theme: dict) -> int:
 	"""Letterhead, purple title bar, period and notes. Returns the row index the
 	column-header band should go on."""
 	ws.row_dimensions[1].height = 37
-	if logo_path:
-		_add_logo(ws, logo_path)
+	if logo_paths:
+		_add_logos(ws, logo_paths)
 
 	brand = meta.get("brand") or "PT PENCIPTA ORGANIK INDONESIA"
 	ws.cell(row=2, column=FIRST_COL, value=brand).font = Font(
@@ -166,7 +230,7 @@ def _write_header(ws, spec: dict, meta: dict, ncols: int, last_letter: str, logo
 	)
 	cell = ws.cell(row=title_row, column=FIRST_COL, value=spec.get("title") or "")
 	cell.font = Font(name=FONT, size=14, bold=True, color=WHITE)
-	cell.fill = PatternFill("solid", fgColor=PURPLE)
+	cell.fill = PatternFill("solid", fgColor=theme["bar"])
 	cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
 
 	row = title_row + 1
@@ -174,7 +238,7 @@ def _write_header(ws, spec: dict, meta: dict, ncols: int, last_letter: str, logo
 	if spec.get("subtitle"):
 		lines.append(spec["subtitle"])
 	lines.extend(spec.get("notes") or [])
-	fill = PatternFill("solid", fgColor=LAVENDER)
+	fill = PatternFill("solid", fgColor=theme["band"])
 	for line in lines:
 		ws.merge_cells(
 			start_row=row, start_column=FIRST_COL, end_row=row,
@@ -190,12 +254,12 @@ def _write_header(ws, spec: dict, meta: dict, ncols: int, last_letter: str, logo
 	return row + 1  # one blank spacer row before the column headers
 
 
-def _write_column_headers(ws, columns: list, row: int):
+def _write_column_headers(ws, columns: list, row: int, theme: dict):
 	ws.row_dimensions[row].height = 26
 	for i, col in enumerate(columns):
 		c = ws.cell(row=row, column=FIRST_COL + i, value=col.get("header") or "")
 		c.font = Font(name=FONT, size=10, bold=True, color=WHITE)
-		c.fill = PatternFill("solid", fgColor=PURPLE)
+		c.fill = PatternFill("solid", fgColor=theme["bar"])
 		c.border = BOX
 		c.alignment = Alignment(
 			horizontal="right" if col.get("kind") in ("money", "int") else "left",
@@ -204,7 +268,8 @@ def _write_column_headers(ws, columns: list, row: int):
 		)
 
 
-def _write_row(ws, spec_row: dict, columns: list, row: int, money_fmt: str, indent_col: int = 0):
+def _write_row(ws, spec_row: dict, columns: list, row: int, money_fmt: str, indent_col: int = 0, theme: dict | None = None):
+	theme = theme or THEMES["ALL"]
 	style = spec_row.get("style") or "normal"
 	cells = spec_row.get("cells") or []
 	indent = spec_row.get("indent") or 0
@@ -215,10 +280,10 @@ def _write_row(ws, spec_row: dict, columns: list, row: int, money_fmt: str, inde
 	bold = style in ("section", "total", "subtotal", "flag")
 	if style == "total":
 		font = Font(name=FONT, size=10, bold=True, color=WHITE)
-		fill = PatternFill("solid", fgColor=PURPLE)
+		fill = PatternFill("solid", fgColor=theme["bar"])
 	elif style == "section":
 		font = Font(name=FONT, size=10, bold=True, color=BLACK)
-		fill = PatternFill("solid", fgColor=LAVENDER)
+		fill = PatternFill("solid", fgColor=theme["band"])
 	elif style == "flag":
 		font = RED_FONT
 		fill = RED_FILL
@@ -266,7 +331,9 @@ def _write_row(ws, spec_row: dict, columns: list, row: int, money_fmt: str, inde
 __all__ = [
 	"MONEY_FMT",
 	"RP_FMT",
+	"THEMES",
 	"_month_end_label",
 	"_month_label",
 	"build_workbook",
+	"theme_for",
 ]

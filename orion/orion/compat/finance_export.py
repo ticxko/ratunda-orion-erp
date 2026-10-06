@@ -52,6 +52,7 @@ from orion.compat.finance_export_xlsx import (
 	_month_end_label,
 	_month_label,
 	build_workbook,
+	theme_for,
 )
 
 SHEET_KEYS = (
@@ -150,8 +151,18 @@ def _build(from_s, to_s, as_of_s, keys, bl, monthly, account_id):
 
 	specs.insert(0, _cover_sheet(ctx, keys, checks))
 	meta = {"brand": frappe.db.get_value("Company", company, "company_name") or company}
-	logo = frappe.get_app_path("orion", "public", "images", "ratunda-logo.png")
-	wb = build_workbook(specs, meta, logo if os.path.exists(logo) else None)
+	# Palette and marks follow the business line: Ratunda purple, Poiesis pink,
+	# and a neutral blue carrying both marks when the run covers the company.
+	theme = theme_for(bl)
+	logos = [
+		path
+		for path in (
+			frappe.get_app_path("orion", "public", "images", name)
+			for name in theme["logos"]
+		)
+		if os.path.exists(path)
+	]
+	wb = build_workbook(specs, meta, logos, theme)
 
 	stamp = "%s_%s" % (from_d.strftime("%Y%m"), to_d.strftime("%Y%m"))
 	name = "Laporan-Keuangan-%s.xlsx" % stamp
