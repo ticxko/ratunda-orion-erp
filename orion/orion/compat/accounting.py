@@ -41,6 +41,7 @@ from decimal import Decimal
 import frappe
 
 from orion.accounting.loan_codes import next_doc_code, recompute_outstanding
+from orion.accounting.report_math import cash_flow, fold_monthly, month_keys
 from orion.accounting.txn_hash import compute_txn_hash, has_real_ref
 from orion.compat.handle import route, split_path
 
@@ -234,114 +235,162 @@ def journal_entries(path: str, verb: str, payload: dict):
 def general_ledger(path: str, verb: str, payload: dict):
 	"""General ledger — app/routers/accounting/general_ledger.py GET
 	?accountId&from&to -> {account, openingBalance, closingBalance,
-	totalDebit, totalCredit, rows: [GLRow]} (money as JSON numbers)."""
+	totalDebit, totalCredit, rows: [GLRow]} (money as JSON numbers).
+
+	accountId is optional, because the Excel export needs the whole ledger: when
+	it is omitted every active leaf account comes back as a list of the same
+	per-account blocks under `accounts`, in code order. Either way this is two
+	queries, never one per account."""
 	_read_only(verb, "/api/accounting/general-ledger")
 	_bare, query = split_path(path)
-	account_id = query.get("accountId")
-	if not account_id:
-		frappe.throw("accountId is required")
-	acc = _resolve_account(account_id)
-	if not acc:
-		frappe.throw("Account not found", exc=frappe.DoesNotExistError)
-
 	company = _company()
-	normal = _normal_balance(acc.root_type)
 	from_d = _parse_date(query.get("from"))
 	to_d = _parse_date(query.get("to"))
+	account_id = query.get("accountId")
 
-	opening = 0.0
+	if account_id:
+		acc = _resolve_account(account_id)
+		if not acc:
+			frappe.throw("Account not found", exc=frappe.DoesNotExistError)
+		return _gl_blocks(company, [acc], from_d, to_d)[0]
+
+	bl = query.get("businessLine") or "ALL"
+	accounts = [
+		r
+		for r in _account_rows(company)
+		if not r.disabled and not r.is_group and _bl_ok(r, bl)
+	]
+	blocks = _gl_blocks(company, accounts, from_d, to_d)
+	return {
+		"accounts": blocks,
+		"totalDebit": float(sum(b["totalDebit"] for b in blocks)),
+		"totalCredit": float(sum(b["totalCredit"] for b in blocks)),
+	}
+
+
+def _gl_blocks(company: str, accounts: list, from_d, to_d) -> list:
+	"""One ledger block per account — opening balance, rows carrying a running
+	balance that resets per account, closing balance. Two queries total
+	regardless of how many accounts are asked for: one grouped opening-balance
+	query and one row fetch."""
+	names = [a.name for a in accounts]
+	if not names:
+		return []
+	# Callers pass either a datetime (the route, via _parse_date) or a plain date
+	# (finance_export). Normalise once so neither has to care.
+	from_d = _as_date(from_d)
+	to_d = _as_date(to_d)
+
+	openings = {}
 	if from_d:
-		row = frappe.db.sql(
-			"""select coalesce(sum(debit), 0), coalesce(sum(credit), 0)
+		rows = frappe.db.sql(
+			"""select account,
+				coalesce(sum(debit), 0) as d,
+				coalesce(sum(credit), 0) as c
 			from `tabGL Entry`
-			where company = %s and account = %s and is_cancelled = 0
-				and posting_date < %s""",
-			(company, acc.name, from_d.date()),
-		)[0]
-		d, c = float(row[0]), float(row[1])
-		opening = (d - c) if normal == "DEBIT" else (c - d)
+			where company = %s and is_cancelled = 0 and posting_date < %s
+				and account in %s
+			group by account""",
+			(company, from_d, tuple(names)),
+			as_dict=True,
+		)
+		openings = {r.account: (float(r.d), float(r.c)) for r in rows}
 
 	filters = [
 		["company", "=", company],
-		["account", "=", acc.name],
+		["account", "in", names],
 		["is_cancelled", "=", 0],
 	]
 	if from_d:
-		filters.append(["posting_date", ">=", from_d.date()])
+		filters.append(["posting_date", ">=", from_d])
 	if to_d:
-		filters.append(["posting_date", "<=", to_d.date()])
+		filters.append(["posting_date", "<=", to_d])
 	gles = frappe.get_all(
 		"GL Entry",
 		filters=filters,
 		fields=[
-			"name", "posting_date", "debit", "credit",
+			"name", "account", "posting_date", "debit", "credit",
 			"voucher_type", "voucher_no", "remarks", "creation",
 		],
 		order_by="posting_date asc, creation asc",
 	)
+	by_account = {}
+	for g in gles:
+		by_account.setdefault(g.account, []).append(g)
 
 	je_meta = _je_meta(
 		{g.voucher_no for g in gles if g.voucher_type == "Journal Entry"}
 	)
 
-	running = opening
-	total_debit = 0.0
-	total_credit = 0.0
-	rows = []
-	for g in gles:
-		d = float(g.debit or 0)
-		c = float(g.credit or 0)
-		running += (d - c) if normal == "DEBIT" else (c - d)
-		total_debit += d
-		total_credit += c
-
-		je = je_meta.get(g.voucher_no) if g.voucher_type == "Journal Entry" else None
-		line_note = g.remarks if g.remarks and g.remarks != "No Remarks" else None
-		if je:
-			entry_id = je.orion_legacy_id or je.name
-			description = je.user_remark or line_note or ""
-			reference = je.cheque_no
-			source_type = je.orion_source_type or "MANUAL"
-		else:
-			entry_id = g.voucher_no
-			description = line_note or g.voucher_no
-			reference = g.voucher_no
-			source_type = SOURCE_TYPE_BY_VOUCHER.get(g.voucher_type, "MANUAL")
-		rows.append(
+	out = []
+	for acc in accounts:
+		normal = _normal_balance(acc.root_type)
+		d0, c0 = openings.get(acc.name, (0.0, 0.0))
+		opening = ((d0 - c0) if normal == "DEBIT" else (c0 - d0)) if from_d else 0.0
+		running = opening
+		total_debit = 0.0
+		total_credit = 0.0
+		rows = []
+		for g in by_account.get(acc.name, []):
+			d = float(g.debit or 0)
+			c = float(g.credit or 0)
+			running += (d - c) if normal == "DEBIT" else (c - d)
+			total_debit += d
+			total_credit += c
+			rows.append(_gl_row(g, je_meta, d, c, running))
+		out.append(
 			{
-				"id": g.name,
-				"entryId": entry_id,
-				"date": _iso_date(g.posting_date),
-				"description": description,
-				"reference": reference,
-				"sourceType": source_type,
-				"lineNote": line_note,
-				"debit": d,
-				"credit": c,
-				"balance": running,
+				"account": {
+					"id": acc.orion_legacy_id or acc.name,
+					"code": acc.account_number or "",
+					"name": acc.account_name,
+					"normalBalance": normal,
+					"type": _orion_type(acc),
+				},
+				"openingBalance": opening,
+				"closingBalance": running,
+				"totalDebit": total_debit,
+				"totalCredit": total_credit,
+				"rows": rows,
 			}
 		)
+	return out
 
+
+def _gl_row(g, je_meta: dict, d: float, c: float, running: float) -> dict:
+	"""One ledger row, shaped exactly as the single-account endpoint always has,
+	so the export cannot drift from the screen."""
+	je = je_meta.get(g.voucher_no) if g.voucher_type == "Journal Entry" else None
+	line_note = g.remarks if g.remarks and g.remarks != "No Remarks" else None
+	if je:
+		entry_id = je.orion_legacy_id or je.name
+		description = je.user_remark or line_note or ""
+		reference = je.cheque_no
+		source_type = je.orion_source_type or "MANUAL"
+	else:
+		entry_id = g.voucher_no
+		description = line_note or g.voucher_no
+		reference = g.voucher_no
+		source_type = SOURCE_TYPE_BY_VOUCHER.get(g.voucher_type, "MANUAL")
 	return {
-		"account": {
-			"id": acc.orion_legacy_id or acc.name,
-			"code": acc.account_number or "",
-			"name": acc.account_name,
-			"normalBalance": normal,
-			"type": _orion_type(acc),
-		},
-		"openingBalance": opening,
-		"closingBalance": running,
-		"totalDebit": total_debit,
-		"totalCredit": total_credit,
-		"rows": rows,
+		"id": g.name,
+		"entryId": entry_id,
+		"date": _iso_date(g.posting_date),
+		"description": description,
+		"reference": reference,
+		"sourceType": source_type,
+		"lineNote": line_note,
+		"debit": d,
+		"credit": c,
+		"balance": running,
 	}
 
 
 @route(FR_PREFIX)
 def financial_reports(path: str, verb: str, payload: dict):
 	"""Financial reports — app/routers/accounting/financial_reports.py
-	(GET /trial-balance, /profit-loss, /balance-sheet)."""
+	(GET /trial-balance, /profit-loss, /balance-sheet), plus /cash-flow which
+	is new in compat and has no bellatrix-python source."""
 	_read_only(verb, FR_PREFIX)
 	bare, query = split_path(path)
 	report = bare[len(FR_PREFIX):].strip("/")
@@ -351,6 +400,8 @@ def financial_reports(path: str, verb: str, payload: dict):
 		return _profit_loss(query)
 	if report == "balance-sheet":
 		return _balance_sheet(query)
+	if report == "cash-flow":
+		return _cash_flow(query)
 	frappe.throw("No compat handler for %s" % bare, exc=frappe.DoesNotExistError)
 
 
@@ -364,13 +415,24 @@ def _trial_balance(query: dict) -> dict:
 	bl = query.get("businessLine") or "ALL"
 	company = _company()
 
-	accounts = [
+	accounts = _tb_accounts(company, bl)
+	aggs = _aggregate(company, _parse_date(from_).date(), _parse_date(to).date())
+	return _trial_balance_from(accounts, aggs, from_, to)
+
+
+def _tb_accounts(company: str, bl: str) -> list:
+	"""Active leaf accounts a trial balance covers, in code order."""
+	return [
 		r
 		for r in _account_rows(company)
 		if not r.disabled and not r.is_group and _bl_ok(r, bl)
 	]
-	aggs = _aggregate(company, _parse_date(from_).date(), _parse_date(to).date())
 
+
+def _trial_balance_from(accounts, aggs: dict, from_, to) -> dict:
+	"""Pure core — shape a trial balance from pre-computed aggs. Shared by the
+	endpoint above and by finance_export's per-month columns, so an exported
+	column can never drift from the on-screen report."""
 	rows = []
 	total_debit = 0.0
 	total_credit = 0.0
@@ -413,6 +475,13 @@ def _profit_loss(query: dict) -> dict:
 	bl = query.get("businessLine") or "ALL"
 	company = _company()
 
+	accounts, header_accounts, legacy_by_name = _pl_accounts(company, bl)
+	aggs = _aggregate(company, _parse_date(from_).date(), _parse_date(to).date())
+	return _profit_loss_from(accounts, header_accounts, legacy_by_name, aggs, from_, to)
+
+
+def _pl_accounts(company: str, bl: str):
+	"""(leaf accounts, header accounts, legacy-id map) a P&L covers."""
 	rows = _account_rows(company)
 	legacy_by_name = {r.name: (r.orion_legacy_id or r.name) for r in rows}
 	all_accounts = [
@@ -420,11 +489,15 @@ def _profit_loss(query: dict) -> dict:
 		for r in rows
 		if not r.disabled and _orion_type(r) in PL_TYPES and _bl_ok(r, bl)
 	]
-	accounts = [a for a in all_accounts if not a.is_group]
-	header_accounts = [a for a in all_accounts if a.is_group]
+	return (
+		[a for a in all_accounts if not a.is_group],
+		[a for a in all_accounts if a.is_group],
+		legacy_by_name,
+	)
 
-	aggs = _aggregate(company, _parse_date(from_).date(), _parse_date(to).date())
 
+def _profit_loss_from(accounts, header_accounts, legacy_by_name: dict, aggs: dict, from_, to) -> dict:
+	"""Pure core — shape a P&L from pre-computed aggs (see _trial_balance_from)."""
 	revenue = _build_section(accounts, aggs, legacy_by_name, ("REVENUE", "OTHER_INCOME"))
 	cogs = _build_section(accounts, aggs, legacy_by_name, ("COGS",))
 	gross_profit = revenue["total"] - cogs["total"]
@@ -455,6 +528,13 @@ def _balance_sheet(query: dict) -> dict:
 	bl = query.get("businessLine") or "ALL"
 	company = _company()
 
+	accounts, legacy_by_name = _bs_accounts(company, bl)
+	aggs = _aggregate(company, None, _parse_date(as_of).date())
+	return _balance_sheet_from(accounts, legacy_by_name, aggs, as_of)
+
+
+def _bs_accounts(company: str, bl: str):
+	"""(leaf accounts, legacy-id map) a balance sheet covers."""
 	rows = _account_rows(company)
 	legacy_by_name = {r.name: (r.orion_legacy_id or r.name) for r in rows}
 	accounts = [
@@ -462,9 +542,11 @@ def _balance_sheet(query: dict) -> dict:
 		for r in rows
 		if not r.disabled and not r.is_group and _orion_type(r) in BS_TYPES and _bl_ok(r, bl)
 	]
+	return accounts, legacy_by_name
 
-	aggs = _aggregate(company, None, _parse_date(as_of).date())
 
+def _balance_sheet_from(accounts, legacy_by_name: dict, aggs: dict, as_of) -> dict:
+	"""Pure core — shape a balance sheet from pre-computed aggs (cumulative)."""
 	assets = _build_section(accounts, aggs, legacy_by_name, ("ASSET",))
 	liabilities = _build_section(accounts, aggs, legacy_by_name, ("LIABILITY",))
 	equity = _build_section(accounts, aggs, legacy_by_name, ("EQUITY",))
@@ -478,6 +560,134 @@ def _balance_sheet(query: dict) -> dict:
 		"totalLiabilitiesAndEquity": tot_le,
 		"isBalanced": abs(assets["total"] - tot_le) < 0.01,
 	}
+
+
+def _cash_flow(query: dict) -> dict:
+	"""Arus Kas — direct method, from the legs of every voucher that touches a
+	cash or bank account inside the period. New in compat; there is no
+	bellatrix-python source for this one.
+
+	Deliberately ignores businessLine. All six cash accounts are tagged ALL, so
+	filtering the pool by business line is a no-op; and filtering the
+	*counterpart* legs would destroy `sum(attributed) == delta cash` by
+	construction, so the tie-out could never hold. Business line lives on
+	Account.orion_business_line only, so there is no per-line cash segregation
+	in the data to recover it from. A plausible-looking per-line cash flow would
+	be worse than none, so the response says so and feynman disables the
+	selector on this tab.
+
+	The arithmetic lives in orion.accounting.report_math.cash_flow; this is the
+	frappe glue around it."""
+	from_, to = query.get("from"), query.get("to")
+	if not from_ or not to:
+		frappe.throw("from and to are required")
+	company = _company()
+	from_d = _parse_date(from_).date()
+	to_d = _parse_date(to).date()
+
+	rows = _account_rows(company)
+	# Not filtered by `disabled` — a closed bank account still has history.
+	# 1-1900 Bank Reconciliation Suspense is NOT cash: report_math breaks it out
+	# as a flagged staging line so Saldo Akhir stays real money.
+	cash_names = {
+		r.name for r in rows if not r.is_group and r.account_type in ("Bank", "Cash")
+	}
+	if not cash_names:
+		frappe.throw("No bank or cash accounts configured")
+	meta = {
+		r.name: {
+			"code": r.account_number or "",
+			"name": r.account_name,
+			"root_type": r.root_type,
+			"account_type": r.account_type,
+			"orion_type": _orion_type(r),
+		}
+		for r in rows
+	}
+
+	opening = _cash_position(company, cash_names, from_d, inclusive=False)
+
+	# Vouchers whose CASH leg falls inside the period...
+	vouchers = frappe.db.sql(
+		"""select distinct voucher_type, voucher_no
+		from `tabGL Entry`
+		where company = %s and is_cancelled = 0
+			and account in %s
+			and posting_date between %s and %s""",
+		(company, tuple(cash_names), from_d, to_d),
+		as_dict=True,
+	)
+	legs = []
+	if vouchers:
+		# ...then ALL of their legs with NO date filter, each bucketed by its own
+		# posting_date. Identical to a bounded fetch given that no voucher spans
+		# dates (verified on live data), but if that ever changes the stray legs
+		# surface in `outsidePeriod` instead of silently unbalancing the
+		# statement. Pairs are matched in Python because a voucher name is unique
+		# per doctype, not globally.
+		keyset = {(v.voucher_type, v.voucher_no) for v in vouchers}
+		gles = frappe.db.sql(
+			"""select voucher_type, voucher_no, account, debit, credit, posting_date
+			from `tabGL Entry`
+			where company = %s and is_cancelled = 0 and voucher_no in %s""",
+			(company, tuple({v.voucher_no for v in vouchers})),
+			as_dict=True,
+		)
+		for g in gles:
+			if (g.voucher_type, g.voucher_no) not in keyset:
+				continue
+			legs.append(
+				{
+					"voucher_type": g.voucher_type,
+					"voucher_no": g.voucher_no,
+					"account": g.account,
+					"debit": g.debit,
+					"credit": g.credit,
+					"ym": g.posting_date.year * 100 + g.posting_date.month,
+					"in_period": from_d <= g.posting_date <= to_d,
+				}
+			)
+
+	months = month_keys(from_d, to_d)
+	out = cash_flow(legs, cash_names, meta, months, opening)
+
+	# Independent tie-out: the closing balance straight off the ledger. Never
+	# throw and never plug — a mismatch is surfaced as a flagged line so the
+	# difference is actionable instead of invisible.
+	gl_closing = _cash_position(company, cash_names, to_d, inclusive=True)
+	out["saldoAkhirBukuBesar"] = gl_closing
+	out["selisih"] = out["saldoAkhir"] - gl_closing
+	out["isBalanced"] = abs(out["selisih"]) < 1.0
+	out["period"] = {"from": from_, "to": to}
+	out["months"] = months
+	out["businessLine"] = "ALL"
+	out["businessLineNote"] = (
+		"Arus kas tidak dapat dipisah per lini bisnis, akun kas tidak ditandai."
+	)
+	out["cashAccounts"] = [
+		{"code": meta[n]["code"], "name": meta[n]["name"]}
+		for n in sorted(cash_names, key=lambda n: meta[n]["code"])
+	]
+	return out
+
+
+def _cash_position(company: str, cash_names, on_date, inclusive: bool) -> float:
+	"""Signed cash-pool balance, raw debit - credit.
+
+	Never routed through _normal_balance: _account_row carries a deliberate
+	EQUITY+DEBIT parity flip that would corrupt the sign, and raw d-c stays
+	correct even if one of these accounts were ever configured as an overdraft
+	liability."""
+	op = "<=" if inclusive else "<"
+	row = frappe.db.sql(
+		"""select coalesce(sum(debit), 0), coalesce(sum(credit), 0)
+		from `tabGL Entry`
+		where company = %%s and is_cancelled = 0 and posting_date %s %%s
+			and account in %%s"""
+		% op,
+		(company, on_date, tuple(cash_names)),
+	)[0]
+	return float(row[0]) - float(row[1])
 
 
 # ── journal entry builders ──────────────────────────────────────────────────
@@ -637,6 +847,45 @@ def _aggregate(company: str, from_date, to_date) -> dict:
 	return {r.account: (float(r.d), float(r.c)) for r in rows}
 
 
+def _aggregate_monthly(company: str, from_date, to_date, cumulative: bool = False) -> dict:
+	"""{ym: {account: (debit, credit)}} — one inner dict per month, each shaped
+	exactly like _aggregate's return so it drops straight into the report cores
+	(_trial_balance_from and friends). That shared shape is what keeps an
+	exported month column from ever drifting from the on-screen report.
+
+	Flow mode (cumulative=False) bounds the query to the range, giving each
+	month's own activity — for trial balance and P&L. Cumulative mode drops the
+	lower bound and carries balances forward, so each month's value is the
+	as-of-month-end position — for the balance sheet.
+
+	The bucket key is year()*100 + month() rather than
+	date_format(posting_date, '%Y-%m') deliberately: frappe.db.sql hands the
+	query to pymysql, which does `query % args`, so a literal %Y would raise
+	ValueError: unsupported format character.
+
+	The pivot/carry-forward itself lives in orion.accounting.report_math so it
+	is unit-testable without a bench."""
+	conditions = "company = %s and is_cancelled = 0 and posting_date <= %s"
+	params = [company, to_date]
+	if not cumulative:
+		conditions += " and posting_date >= %s"
+		params.append(from_date)
+	rows = frappe.db.sql(
+		"""select account,
+			year(posting_date) * 100 + month(posting_date) as ym,
+			coalesce(sum(debit), 0) as d,
+			coalesce(sum(credit), 0) as c
+		from `tabGL Entry` where %s group by account, ym"""
+		% conditions,
+		params,
+		as_dict=True,
+	)
+	deltas: dict = {}
+	for r in rows:
+		deltas.setdefault(int(r.ym), {})[r.account] = (float(r.d), float(r.c))
+	return fold_monthly(deltas, month_keys(from_date, to_date), cumulative)
+
+
 def _account_row(a, aggs: dict, legacy_by_name: dict) -> dict:
 	"""financial_reports.py _account_row. The EQUITY+DEBIT flip is kept for
 	parity even though compat derives normalBalance from root_type (so
@@ -768,6 +1017,17 @@ def _parse_date(s: str | None):
 	if not s:
 		return None
 	return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+
+
+def _as_date(value):
+	"""datetime -> date, date -> date, None -> None.
+
+	The general-ledger route hands in datetimes (via _parse_date) while
+	finance_export hands in plain dates; normalising here means neither caller
+	has to care."""
+	if value is None:
+		return None
+	return value.date() if hasattr(value, "date") else value
 
 
 def _iso(dt) -> str | None:
